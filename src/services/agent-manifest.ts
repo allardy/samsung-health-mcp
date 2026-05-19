@@ -21,6 +21,7 @@ const STANDARD_TOOLS = [
   "samsung_health_data_inventory",
   "samsung_health_daily_summary",
   "samsung_health_demo",
+  "samsung_health_export_freshness",
   "samsung_health_list_records",
   "samsung_health_list_workouts",
   "samsung_health_onboarding",
