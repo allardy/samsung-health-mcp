@@ -31,6 +31,7 @@ import { buildDailySummary, buildWeeklySummary, formatSummaryMarkdown } from "..
 import { buildWellnessContext, formatWellnessContextMarkdown } from "../services/context.js";
 import { buildDataInventory, formatInventoryMarkdown } from "../services/inventory.js";
 import { buildExportFreshness, formatExportFreshnessMarkdown } from "../services/freshness.js";
+import { clearCache } from "../services/incremental-cache.js";
 import { recordPrivacyView, workoutPrivacyView } from "../services/privacy.js";
 
 export function registerSamsungHealthTools(server: McpServer): void {
@@ -247,7 +248,7 @@ export function registerSamsungHealthTools(server: McpServer): void {
   }, async (params) => {
     try {
       const config = getConfig();
-      const records = await listRecords({ exportPath: config.exportPath, type: params.type, start: params.start, end: params.end, limit: params.limit });
+      const records = await listRecords({ exportPath: config.exportPath, type: params.type, start: params.start, end: params.end, limit: params.limit, useIncrementalCache: params.incremental_cache === true });
       const privacyMode = params.privacy_mode ?? config.privacyMode;
       const output = {
         source: "samsung_health_export",
@@ -453,6 +454,38 @@ export function registerSamsungHealthTools(server: McpServer): void {
           summary: payload.summary,
           missing_critical: payload.missing_critical,
           storage_path: payload.storage_path
+        }));
+      } catch (error) {
+        return makeError((error as Error).message);
+      }
+    }
+  );
+
+  server.registerTool(
+    "samsung_health_clear_incremental_cache",
+    {
+      title: "Clear Samsung Health Incremental Import Cache",
+      description:
+        "Manually clear the incremental import cache at ~/.samsung-health-mcp/incremental-cache.json. The cache tracks the latest parsed timestamp per Samsung Health record category so subsequent `samsung_health_list_records` calls (with `incremental_cache: true`) skip already-seen records. Use this when you want to force a full re-parse without changing the export file. The cache also auto-invalidates when the export file mtime changes.",
+      inputSchema: ResponseOnlyInputSchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+    },
+    async ({ response_format }) => {
+      try {
+        const result = await clearCache();
+        const payload = {
+          ok: true,
+          existed: result.existed,
+          path: result.path,
+          message: result.existed
+            ? "Incremental cache cleared. Next list_records call with incremental_cache=true will re-parse from the beginning."
+            : "No incremental cache file existed. Nothing to clear."
+        };
+        return makeResponse(payload, response_format, bulletList("Samsung Health Incremental Cache", {
+          ok: payload.ok,
+          existed: payload.existed,
+          path: payload.path,
+          message: payload.message
         }));
       } catch (error) {
         return makeError((error as Error).message);

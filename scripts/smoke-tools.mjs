@@ -5,6 +5,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const expectedTools = [
   'samsung_health_agent_manifest',
   'samsung_health_capabilities',
+  'samsung_health_clear_incremental_cache',
   'samsung_health_connection_status',
   'samsung_health_daily_summary',
   'samsung_health_data_inventory',

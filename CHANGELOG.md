@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3 - 2026-05-20
+
+### Added
+
+- **Incremental import cache** at `~/.samsung-health-mcp/incremental-cache.json` (chmod 600). Persists the latest parsed timestamp per Samsung Health record category so repeated `samsung_health_list_records` calls can skip already-seen records on large CSV/ZIP exports. Opt-in per call via `incremental_cache: true` (requires `type` filter). The cache is automatically invalidated when the export file/directory mtime changes (signaling a fresh export from the Samsung Health app).
+- **`samsung_health_clear_incremental_cache` tool** for manual cache invalidation when you want to force a full re-parse without re-exporting from Samsung Health. Tool count: 16 → 17.
+- **`incremental_cache` block in `samsung_health_connection_status`** showing cache existence, file size, last-update timestamp, tracked export mtime, and per-category last-parsed entries.
+
 ## 0.4.2 - 2026-05-19
 
 ### Added
