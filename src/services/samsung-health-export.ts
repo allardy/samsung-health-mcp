@@ -281,8 +281,12 @@ export function parseSamsungDate(value: string | undefined): Date | undefined {
     const numeric = Number(trimmed);
     if (Number.isFinite(numeric)) {
       const milliseconds = numeric > 10_000_000_000 ? numeric : numeric * 1000;
-      const parsed = new Date(milliseconds);
-      if (!Number.isNaN(parsed.getTime())) return parsed;
+      // Reject pre-2000 epochs (catches "0", version numbers, IDs that aren't really timestamps).
+      if (milliseconds > 946_684_800_000) {
+        const parsed = new Date(milliseconds);
+        if (!Number.isNaN(parsed.getTime())) return parsed;
+      }
+      return undefined;
     }
   }
   const compact = /^(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/.exec(trimmed);
@@ -295,9 +299,12 @@ export function parseSamsungDate(value: string | undefined): Date | undefined {
       Number(compact[5] ?? 0),
       Number(compact[6] ?? 0)
     ));
-    if (!Number.isNaN(parsed.getTime())) return parsed;
+    if (!Number.isNaN(parsed.getTime()) && parsed.getTime() > 946_684_800_000) return parsed;
+    return undefined;
   }
-  return parseFlexibleDate(trimmed);
+  const flex = parseFlexibleDate(trimmed);
+  if (flex && flex.getTime() > 946_684_800_000) return flex;
+  return undefined;
 }
 
 export function recordOverlaps(startValue: string | undefined, endValue: string | undefined, start?: Date, end?: Date): boolean {
@@ -333,9 +340,14 @@ function rowToRecord(sourceName: string, row: CsvRow): SamsungHealthRecord | und
   const creationDate = bestDate(row, DATE_KEYS.created);
   const metric = metricForRecord(type, normalizedFile, row, startDate, endDate);
   if (metric.value === undefined && !startDate && !endDate) return undefined;
-  const textValue = type === "samsung_health_sleep" || type === "samsung_health_sleep_stage"
-    ? readString(row, ["sleep_stage", "stage", "sleep_status", "status", "value"]) ?? String(metric.value ?? "")
-    : metric.value === undefined ? undefined : String(metric.value);
+  let textValue: string | undefined;
+  if (type === "samsung_health_sleep") {
+    textValue = "asleep";
+  } else if (type === "samsung_health_sleep_stage") {
+    textValue = decodeSleepStage(readString(row, ["sleep_stage", "stage", "sleep_status"])) ?? "asleep";
+  } else {
+    textValue = metric.value === undefined ? undefined : String(metric.value);
+  }
 
   return {
     type,
@@ -353,12 +365,20 @@ function rowToRecord(sourceName: string, row: CsvRow): SamsungHealthRecord | und
 function rowToWorkout(sourceName: string, row: CsvRow): SamsungHealthWorkout | undefined {
   const normalizedFile = normalizeKey(sourceName);
   if (!normalizedFile.includes("exercise") && !normalizedFile.includes("workout")) return undefined;
+  // Skip sidecar exercise tables that aren't actual workout sessions.
+  if (
+    normalizedFile.includes("exercise_weather") ||
+    normalizedFile.includes("exercise_max_heart_rate") ||
+    normalizedFile.includes("exercise_recovery_heart_rate") ||
+    normalizedFile.includes("exercise_periodization")
+  ) return undefined;
   const startDate = bestDate(row, DATE_KEYS.start);
   const endDate = bestDate(row, DATE_KEYS.end) ?? startDate;
   const duration = durationMinutes(row, startDate, endDate);
   const distance = readNumber(row, ["distance", "total_distance", "distance_meter", "distance_m", "distance_km"]);
-  const energy = readNumber(row, ["calorie", "calories", "calorie_count", "kcal", "total_calorie", "active_calorie"]);
-  const workoutActivityType = readString(row, ["exercise_type", "exercise_name", "activity_type", "workout_type", "type", "name"]) ?? "exercise";
+  const energy = readNumber(row, ["total_calorie", "calorie", "calories", "calorie_count", "kcal", "active_calorie"]);
+  const rawType = readString(row, ["exercise_type", "exercise_name", "activity_type", "workout_type"]);
+  const workoutActivityType = decodeExerciseType(rawType);
   if (!startDate && duration === undefined && distance === undefined && energy === undefined) return undefined;
 
   return {
@@ -378,38 +398,99 @@ function rowToWorkout(sourceName: string, row: CsvRow): SamsungHealthWorkout | u
 }
 
 function inferRecordType(normalizedFile: string, row: CsvRow): string | undefined {
-  const rowKeys = Object.keys(row).map(normalizeKey).join(" ");
-  const haystack = `${normalizedFile} ${rowKeys}`;
-  if (haystack.includes("step")) return "samsung_health_steps";
-  if (haystack.includes("sleep_stage")) return "samsung_health_sleep_stage";
-  if (haystack.includes("sleep")) return "samsung_health_sleep";
-  if (haystack.includes("resting_heart")) return "samsung_health_resting_heart_rate";
-  if (haystack.includes("hrv") || haystack.includes("heart_rate_variability")) return "samsung_health_hrv";
-  if (haystack.includes("heart_rate") || haystack.includes("heartrate")) return "samsung_health_heart_rate";
-  if (haystack.includes("oxygen") || haystack.includes("spo2") || haystack.includes("saturation")) return "samsung_health_oxygen_saturation";
-  if (haystack.includes("respiratory")) return "samsung_health_respiratory_rate";
-  if (haystack.includes("weight") || haystack.includes("body_weight")) return "samsung_health_body_weight";
-  if (haystack.includes("body_fat")) return "samsung_health_body_fat";
-  if (haystack.includes("distance")) return "samsung_health_distance";
-  if (haystack.includes("calorie") || haystack.includes("energy")) return "samsung_health_active_energy";
-  if (Object.keys(row).length > 0 && normalizedFile.includes("samsung")) return `samsung_health_${safeTypeFromFile(normalizedFile)}`;
+  // Classify strictly by filename so administrative files (badges, rewards, insight messages, etc.)
+  // don't get pulled into health categories by coincidental column-name overlap.
+  const f = normalizedFile;
+  // Administrative / non-measurement tables
+  if (f.includes("badge")) return "samsung_health_badge";
+  if (f.includes("rewards")) return "samsung_health_rewards";
+  if (f.includes("insight_message")) return "samsung_health_insight";
+  if (f.includes("report")) return "samsung_health_report";
+  if (f.includes("preferences")) return "samsung_health_preferences";
+  if (f.includes("permission")) return "samsung_health_permission";
+  if (f.includes("social")) return "samsung_health_social";
+  if (f.includes("device_profile")) return "samsung_health_device_profile";
+  if (f.includes("user_profile")) return "samsung_health_user_profile";
+  if (f.includes("goal_history")) return "samsung_health_goal_history";
+  if (f.includes("activity_goal")) return "samsung_health_activity_goal";
+  if (f.includes("activity_level")) return "samsung_health_activity_level";
+  if (f.includes("shm_device")) return "samsung_health_shm_device";
+  if (f.includes("hsp_references")) return "samsung_health_hsp_references";
+  if (f.includes("best_records")) return "samsung_health_best_records";
+  if (f.includes("food_frequent")) return "samsung_health_food";
+  if (f.includes("height")) return "samsung_health_height";
+  if (f.includes("breathing")) return "samsung_health_breathing_exercise";
+  // Day-summary aggregates (separate types so they don't double-count vs per-minute records)
+  if (f.includes("pedometer_day_summary")) return "samsung_health_step_daily";
+  if (f.includes("activity_day_summary")) return "samsung_health_activity_daily";
+  if (f.includes("floors_day_summary")) return "samsung_health_floors_daily";
+  if (f.includes("calories_burned")) return "samsung_health_calories_daily";
+  if (f.includes("step_daily_trend")) return "samsung_health_step_daily_trend";
+  // Sleep family — order matters, most specific first
+  if (f.includes("sleep_combined")) return "samsung_health_sleep_combined";
+  if (f.includes("sleep_apnea")) return "samsung_health_sleep_apnea";
+  if (f.includes("sleep_goal")) return "samsung_health_sleep_goal";
+  if (f.includes("sleep_raw_data")) return "samsung_health_sleep_raw";
+  if (f.includes("sleep_snoring")) return "samsung_health_sleep_snoring";
+  if (f.includes("sleep_stage")) return "samsung_health_sleep_stage";
+  if (f.includes("sleep")) return "samsung_health_sleep";
+  // Specialized signals
+  if (f.includes("nap_data")) return "samsung_health_nap";
+  if (f.includes("alerted_stress")) return "samsung_health_alerted_stress";
+  if (f.includes("alerted_heart_rate")) return "samsung_health_alerted_heart_rate";
+  if (f.includes("ecg")) return "samsung_health_ecg";
+  if (f.includes("blood_pressure") || f.includes("calibration_blood_pressure")) return "samsung_health_blood_pressure";
+  if (f.includes("vitality_score")) return "samsung_health_vitality_score";
+  if (f.includes("skin_temperature") || f.includes("cycle_daily_temperature")) return "samsung_health_skin_temperature";
+  if (f.includes("stress_histogram")) return "samsung_health_stress_histogram";
+  if (f.includes("stress")) return "samsung_health_stress";
+  if (f.includes("water_intake")) return "samsung_health_water_intake";
+  if (f.includes("caffeine_intake")) return "samsung_health_caffeine_intake";
+  if (f.includes("food_info")) return "samsung_health_food";
+  // Vitals
+  if (f.includes("resting_heart_rate")) return "samsung_health_resting_heart_rate";
+  if (f.includes("hrv") || f.includes("heart_rate_variability")) return "samsung_health_hrv";
+  if (f.includes("tracker_heart_rate") || f.includes("heart_rate")) return "samsung_health_heart_rate";
+  if (f.includes("oxygen_saturation") || f.includes("spo2") || f.includes("saturation")) return "samsung_health_oxygen_saturation";
+  if (f.includes("respiratory_rate")) return "samsung_health_respiratory_rate";
+  // Activity
+  if (f.includes("body_fat")) return "samsung_health_body_fat";
+  if (f.includes("weight")) return "samsung_health_body_weight";
+  if (f.includes("step")) return "samsung_health_steps";
+  if (f.includes("distance")) return "samsung_health_distance";
+  if (f.includes("calorie") || f.includes("energy")) return "samsung_health_active_energy";
+  if (f.includes("movement")) return "samsung_health_movement";
+  if (f.includes("floors") || f.includes("floor_count")) return "samsung_health_floors_climbed";
+  // Fallback: classify generically
+  if (Object.keys(row).length > 0 && f.includes("samsung")) return `samsung_health_${safeTypeFromFile(f)}`;
   return undefined;
 }
 
 function metricForRecord(type: string, normalizedFile: string, row: CsvRow, startDate?: string, endDate?: string): { value?: number; unit?: string } {
   switch (type) {
     case "samsung_health_steps":
-      return { value: readNumber(row, ["count", "step_count", "steps", "value"]), unit: "count" };
+      return { value: readNumber(row, ["step_count", "count", "steps", "value"]), unit: "count" };
+    case "samsung_health_step_daily":
+    case "samsung_health_step_daily_trend":
+      return { value: readNumber(row, ["step_count", "count", "steps", "value"]), unit: "count" };
+    case "samsung_health_activity_daily":
+      return { value: readNumber(row, ["step_count", "count", "steps"]), unit: "count" };
+    case "samsung_health_floors_daily":
+      return { value: readNumber(row, ["floor_count", "floors", "count"]), unit: "count" };
+    case "samsung_health_calories_daily":
+      return { value: readNumber(row, ["total_calorie", "active_calorie", "rest_calorie", "calorie"]), unit: "kcal" };
     case "samsung_health_heart_rate":
-      return { value: readNumber(row, ["heart_rate", "bpm", "rate", "value"]), unit: "bpm" };
+      return { value: readNumber(row, ["heart_rate", "bpm", "rate", "average", "mean", "value"]), unit: "bpm" };
+    case "samsung_health_alerted_heart_rate":
+      return { value: readNumber(row, ["heart_rate", "bpm", "max", "min", "value"]), unit: "bpm" };
     case "samsung_health_resting_heart_rate":
       return { value: readNumber(row, ["resting_heart_rate", "resting_hr", "heart_rate", "bpm", "value"]), unit: "bpm" };
     case "samsung_health_hrv":
-      return { value: readNumber(row, ["hrv", "rmssd", "sdnn", "value"]), unit: "ms" };
+      return { value: readNumber(row, ["rmssd", "sdnn", "hrv", "average", "value"]), unit: "ms" };
     case "samsung_health_oxygen_saturation":
-      return { value: readNumber(row, ["spo2", "oxygen_saturation", "saturation", "value"]), unit: "%" };
+      return { value: readNumber(row, ["spo2", "oxygen_saturation", "saturation", "average", "min", "value"]), unit: "%" };
     case "samsung_health_respiratory_rate":
-      return { value: readNumber(row, ["respiratory_rate", "breathing_rate", "value"]), unit: "breaths/min" };
+      return { value: readNumber(row, ["respiratory_rate", "breathing_rate", "average", "value"]), unit: "breaths/min" };
     case "samsung_health_body_weight":
       return { value: readNumber(row, ["weight", "body_weight", "value"]), unit: readString(row, ["unit"]) ?? "kg" };
     case "samsung_health_body_fat":
@@ -419,8 +500,29 @@ function metricForRecord(type: string, normalizedFile: string, row: CsvRow, star
     case "samsung_health_active_energy":
       return { value: readNumber(row, ["calorie", "calories", "calorie_count", "kcal", "value"]), unit: "kcal" };
     case "samsung_health_sleep":
+      return { value: durationMinutes(row, startDate, endDate), unit: "min" };
     case "samsung_health_sleep_stage":
       return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_stress":
+      return { value: readNumber(row, ["score", "stress", "average", "value"]), unit: "score" };
+    case "samsung_health_alerted_stress":
+      return { value: readNumber(row, ["score", "stress", "max", "value"]), unit: "score" };
+    case "samsung_health_skin_temperature":
+      return { value: readNumber(row, ["temperature", "skin_temperature", "average", "value"]), unit: "°C" };
+    case "samsung_health_ecg":
+      return { value: readNumber(row, ["mean_heart_rate", "heart_rate", "bpm"]), unit: "bpm" };
+    case "samsung_health_blood_pressure":
+      return { value: readNumber(row, ["systolic", "value"]), unit: "mmHg" };
+    case "samsung_health_vitality_score":
+      return { value: readNumber(row, ["total_score", "score", "activity_score", "sleep_score", "value"]), unit: "score" };
+    case "samsung_health_nap":
+      return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_water_intake":
+      return { value: readNumber(row, ["amount", "volume", "value"]), unit: "ml" };
+    case "samsung_health_caffeine_intake":
+      return { value: readNumber(row, ["amount", "caffeine", "value"]), unit: "mg" };
+    case "samsung_health_food":
+      return { value: readNumber(row, ["calorie", "kcal", "calories"]), unit: "kcal" };
     default:
       return { value: firstUsefulNumber(row), unit: readString(row, ["unit"]) ?? normalizedFile };
   }
@@ -595,9 +697,23 @@ function parseCsv(text: string): CsvRow[] {
   row.push(field.trim());
   rows.push(row);
 
-  const headerRow = rows.find((candidate) => candidate.some(Boolean));
-  if (!headerRow) return [];
-  const headerIndex = rows.indexOf(headerRow);
+  let headerIndex = rows.findIndex((candidate) => candidate.some(Boolean));
+  if (headerIndex < 0) return [];
+  let headerRow = rows[headerIndex];
+  // Samsung Health "personal data" CSVs prefix files with a metadata line:
+  //   com.samsung.X.Y,<version>,<revision>
+  // followed by the real column-header row. Detect and skip.
+  if (
+    headerRow.length <= 3 &&
+    /^com\.samsung\./i.test((headerRow[0] ?? "").trim())
+  ) {
+    const remainder = rows.slice(headerIndex + 1);
+    const nextOffset = remainder.findIndex((candidate) => candidate.some(Boolean));
+    if (nextOffset >= 0) {
+      headerIndex = headerIndex + 1 + nextOffset;
+      headerRow = rows[headerIndex];
+    }
+  }
   const headers = headerRow.map((value, index) => value || `column_${index + 1}`);
   return rows.slice(headerIndex + 1)
     .filter((values) => values.some(Boolean))
@@ -615,8 +731,24 @@ function detectDelimiter(line: string): "," | ";" | "\t" {
 
 function bestDate(row: CsvRow, aliases: string[]): string | undefined {
   const value = readString(row, aliases);
-  const parsed = parseSamsungDate(value);
+  const offset = readString(row, ["time_offset"]);
+  const combined = combineDateAndOffset(value, offset);
+  const parsed = parseSamsungDate(combined);
   return parsed?.toISOString();
+}
+
+function combineDateAndOffset(value: string | undefined, offset: string | undefined): string | undefined {
+  if (!value) return value;
+  const trimmed = value.trim();
+  if (!offset || /^\d+(\.\d+)?$/.test(trimmed)) return value;
+  if (/[+-]\d{2}:?\d{2}$|Z$/.test(trimmed)) return value;
+  const offsetMatch = /^UTC([+-])(\d{2}):?(\d{2})?$/i.exec(offset.trim());
+  if (!offsetMatch) return value;
+  const sign = offsetMatch[1];
+  const hh = offsetMatch[2];
+  const mm = offsetMatch[3] ?? "00";
+  const isoBase = trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T");
+  return `${isoBase}${sign}${hh}:${mm}`;
 }
 
 function readString(row: CsvRow, aliases: string[]): string | undefined {
@@ -632,11 +764,21 @@ function readNumber(row: CsvRow, aliases: string[]): number | undefined {
 
 function findEntry(row: CsvRow, aliases: string[]): [string, string] | undefined {
   const normalizedAliases = aliases.map(normalizeKey);
-  return Object.entries(row).find(([key, value]) => {
-    if (!value?.trim()) return false;
-    const normalized = normalizeKey(key);
-    return normalizedAliases.some((alias) => normalized === alias || normalized.endsWith(`_${alias}`) || normalized.includes(alias));
-  });
+  const entries = Object.entries(row).filter(([, value]) => value?.trim());
+  // Priority: exact match > endsWith(_alias) > includes(alias). Within each tier, alias order wins.
+  for (const alias of normalizedAliases) {
+    const hit = entries.find(([key]) => normalizeKey(key) === alias);
+    if (hit) return hit;
+  }
+  for (const alias of normalizedAliases) {
+    const hit = entries.find(([key]) => normalizeKey(key).endsWith(`_${alias}`));
+    if (hit) return hit;
+  }
+  for (const alias of normalizedAliases) {
+    const hit = entries.find(([key]) => normalizeKey(key).includes(alias));
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 function parseNumber(value: string | undefined): number | undefined {
@@ -681,6 +823,57 @@ function inferSourceName(row: CsvRow): string | undefined {
   return readString(row, ["source", "source_name", "device", "device_name", "pkg_name", "package_name"]);
 }
 
+// Samsung Health exercise_type numeric codes (best-effort; codes vary across SDK versions).
+const EXERCISE_TYPE_NAMES: Record<string, string> = {
+  "0": "free_exercise",
+  "1001": "walking",
+  "1002": "running",
+  "2001": "baseball",
+  "3001": "softball",
+  "4001": "cricket",
+  "5001": "golf",
+  "6001": "billiards",
+  "7001": "bowling",
+  "8001": "fencing",
+  "9001": "ice_hockey",
+  "10001": "field_hockey",
+  "11001": "rugby",
+  "12001": "basketball",
+  "13001": "soccer",
+  "14001": "hiking",
+  "15001": "handball",
+  "16001": "american_football",
+  "11007": "cycling",
+  "13150": "weight_machine",
+  "14001_alt": "hiking"
+};
+
+// Samsung Health sleep stage codes per the SDK enum: AWAKE/LIGHT/DEEP/REM.
+// 0 is the legacy "asleep" marker from before per-stage tracking existed.
+const SLEEP_STAGE_NAMES: Record<string, string> = {
+  "0": "asleep",
+  "40001": "awake",
+  "40002": "light",
+  "40003": "deep",
+  "40004": "rem"
+};
+
+function decodeSleepStage(value: string | undefined): string | undefined {
+  if (!value) return value;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return SLEEP_STAGE_NAMES[trimmed] ?? trimmed;
+}
+
+function decodeExerciseType(value: string | undefined): string {
+  if (!value) return "exercise";
+  const trimmed = value.trim();
+  if (!trimmed) return "exercise";
+  if (!/^\d+$/.test(trimmed)) return trimmed.toLowerCase();
+  const mapped = EXERCISE_TYPE_NAMES[trimmed];
+  return mapped ?? `samsung_exercise_${trimmed}`;
+}
+
 function buildMetadata(row: CsvRow, sourceName: string): Record<string, string> {
   const metadata: Record<string, string> = { source_file: sourceName };
   for (const [key, value] of Object.entries(row)) {
@@ -694,6 +887,7 @@ function safeTypeFromFile(normalizedFile: string): string {
   return normalizedFile
     .replace(/^.*com_samsung_(shealth|health)_?/, "")
     .replace(/_csv$/, "")
+    .replace(/_\d{8,}$/, "")
     .split("_")
     .filter(Boolean)
     .slice(0, 4)
