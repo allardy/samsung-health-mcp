@@ -218,3 +218,13 @@ curl http://127.0.0.1:3000/health
 - Docs site: <https://wellness.delx.ai/connectors/samsung-health>
 - GitHub: <https://github.com/davidmosiah/samsung-health-mcp>
 - Delx Wellness registry: <https://github.com/davidmosiah/delx-wellness>
+
+---
+
+## 📧 Contact & Support
+
+- 📨 **support@delx.ai** — general questions, integration help, partnerships
+- 🐛 **Bug reports / feature requests** — [GitHub Issues](https://github.com/davidmosiah/samsung-health-mcp/issues)
+- 🐦 **Updates** — [@delx369](https://x.com/delx369) on X
+- 🌐 **Site** — [wellness.delx.ai](https://wellness.delx.ai)
+
