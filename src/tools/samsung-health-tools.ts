@@ -5,8 +5,10 @@ import {
   ConnectionStatusInputSchema,
   DailySummaryInputSchema,
   InventoryInputSchema,
+  RangeSummaryInputSchema,
   RecordListInputSchema,
   ResponseOnlyInputSchema,
+  SeriesInputSchema,
   WellnessContextInputSchema,
   WeeklySummaryInputSchema,
   WorkoutListInputSchema
@@ -31,6 +33,8 @@ import { buildDailySummary, buildWeeklySummary, formatSummaryMarkdown } from "..
 import { buildWellnessContext, formatWellnessContextMarkdown } from "../services/context.js";
 import { buildDataInventory, formatInventoryMarkdown } from "../services/inventory.js";
 import { buildExportFreshness, formatExportFreshnessMarkdown } from "../services/freshness.js";
+import { buildSeries, formatSeriesMarkdown } from "../services/series.js";
+import { buildRangeSummary, formatRangeSummaryMarkdown } from "../services/range-summary.js";
 import { clearCache } from "../services/incremental-cache.js";
 import { recordPrivacyView, workoutPrivacyView } from "../services/privacy.js";
 
@@ -369,14 +373,67 @@ export function registerSamsungHealthTools(server: McpServer): void {
 
   server.registerTool("samsung_health_weekly_summary", {
     title: "Samsung Health Weekly Summary",
-    description: "Build a weekly wellness summary from local Samsung Health export data. It is not live Samsung Health and not medical advice.",
+    description: "Build a weekly wellness summary from local Samsung Health export data (1-90 days). It is not live Samsung Health and not medical advice. For longer windows or coarser granularity, prefer samsung_health_range_summary.",
     inputSchema: WeeklySummaryInputSchema.shape,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async ({ end_date, days, timezone, response_format }) => {
     try {
       const config = getConfig();
       const summary = await buildWeeklySummary(config.exportPath, end_date, days, { timezone: timezone ?? config.timezone });
+      // Payload guard: detailed per-day blocks become noisy past a month.
+      // Strip them and point callers at the range_summary tool.
+      if (days > 30 && Array.isArray((summary as { daily?: unknown[] }).daily)) {
+        const trimmed = { ...summary } as Record<string, unknown>;
+        delete trimmed.daily;
+        trimmed.daily_omitted = true;
+        trimmed.daily_omitted_reason = "Per-day blocks omitted for windows > 30 days. Use samsung_health_range_summary with granularity=day for per-day detail, or samsung_health_series for a single metric.";
+        return makeResponse(trimmed, response_format, formatSummaryMarkdown(trimmed));
+      }
       return makeResponse(summary, response_format, formatSummaryMarkdown(summary));
+    } catch (error) {
+      return makeError((error as Error).message);
+    }
+  });
+
+  server.registerTool("samsung_health_series", {
+    title: "Samsung Health Series",
+    description: "Bucketed aggregate series for a single metric across an arbitrary date range. Returns one point per bucket with the chosen statistic (avg / sum / min / max / median / p95 / count), giving a compact payload regardless of how long the window is. Use this for long-range trends (heart rate, HRV, stress, sleep, steps) without enumerating raw records.",
+    inputSchema: SeriesInputSchema.shape,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async ({ metric, start, end, bucket, stat, timezone, max_buckets, response_format }) => {
+    try {
+      const config = getConfig();
+      const series = await buildSeries(config.exportPath, {
+        metric,
+        start,
+        end,
+        bucket,
+        stat,
+        timezone: timezone ?? config.timezone,
+        maxBuckets: max_buckets
+      });
+      return makeResponse(series, response_format, formatSeriesMarkdown(series));
+    } catch (error) {
+      return makeError((error as Error).message);
+    }
+  });
+
+  server.registerTool("samsung_health_range_summary", {
+    title: "Samsung Health Range Summary",
+    description: "Aggregated wellness summary across an arbitrary date range, bucketed by day/week/month. Each bucket carries activity, heart, sleep, stress and workout aggregates — one row per bucket — so months or years can be summarized in a small payload. Use samsung_health_series for finer single-metric resolution.",
+    inputSchema: RangeSummaryInputSchema.shape,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async ({ start, end, granularity, timezone, max_buckets, response_format }) => {
+    try {
+      const config = getConfig();
+      const summary = await buildRangeSummary(config.exportPath, {
+        start,
+        end,
+        granularity,
+        timezone: timezone ?? config.timezone,
+        maxBuckets: max_buckets
+      });
+      return makeResponse(summary, response_format, formatRangeSummaryMarkdown(summary));
     } catch (error) {
       return makeError((error as Error).message);
     }

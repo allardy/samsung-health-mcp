@@ -56,9 +56,34 @@ export const WellnessContextInputSchema = z.object({
 
 export const WeeklySummaryInputSchema = z.object({
   end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD local end date. Defaults to today in the configured timezone."),
-  days: z.number().int().min(1).max(30).default(7),
+  days: z.number().int().min(1).max(90).default(7).describe("Days of history to include (1..90). For longer windows or coarser views prefer samsung_health_range_summary."),
   timezone: TimezoneSchema,
   privacy_mode: PrivacyModeSchema,
+  response_format: ResponseFormatSchema
+}).strict();
+
+export const SeriesStatSchema = z.enum(["avg", "sum", "min", "max", "median", "p95", "count"]).default("avg");
+export const SeriesBucketSchema = z.enum(["1h", "6h", "1d", "1w", "1m"]).default("1d");
+
+export const SeriesInputSchema = z.object({
+  metric: z.string().min(1).describe("Samsung Health record type to aggregate, e.g. samsung_health_heart_rate, samsung_health_stress, samsung_health_steps, samsung_health_hrv."),
+  start: z.string().optional().describe("Optional ISO date/time lower bound. Defaults to a sensible look-back based on the chosen bucket size."),
+  end: z.string().optional().describe("Optional ISO date/time upper bound. Defaults to today in the configured timezone."),
+  bucket: SeriesBucketSchema,
+  stat: SeriesStatSchema,
+  timezone: TimezoneSchema,
+  max_buckets: z.number().int().min(1).max(5000).optional().describe("Safety cap on bucket count (default 1000). Requests above the cap fail with a hint to widen the bucket."),
+  response_format: ResponseFormatSchema
+}).strict();
+
+export const RangeSummaryGranularitySchema = z.enum(["day", "week", "month"]).default("week");
+
+export const RangeSummaryInputSchema = z.object({
+  start: z.string().optional().describe("Optional ISO date/time lower bound. Defaults to a sensible look-back based on granularity."),
+  end: z.string().optional().describe("Optional ISO date/time upper bound. Defaults to today in the configured timezone."),
+  granularity: RangeSummaryGranularitySchema,
+  timezone: TimezoneSchema,
+  max_buckets: z.number().int().min(1).max(1000).optional().describe("Safety cap on bucket count (default 200)."),
   response_format: ResponseFormatSchema
 }).strict();
 
@@ -79,3 +104,5 @@ export type DailySummaryInput = z.infer<typeof DailySummaryInputSchema>;
 export type WellnessContextInput = z.infer<typeof WellnessContextInputSchema>;
 export type WeeklySummaryInput = z.infer<typeof WeeklySummaryInputSchema>;
 export type InventoryInput = z.infer<typeof InventoryInputSchema>;
+export type SeriesInput = z.infer<typeof SeriesInputSchema>;
+export type RangeSummaryInput = z.infer<typeof RangeSummaryInputSchema>;

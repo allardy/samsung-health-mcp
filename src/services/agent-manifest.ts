@@ -9,6 +9,8 @@ export const HERMES_DIRECT_TOOLS = [
   "mcp_samsung_health_samsung_health_data_inventory",
   "mcp_samsung_health_samsung_health_daily_summary",
   "mcp_samsung_health_samsung_health_weekly_summary",
+  "mcp_samsung_health_samsung_health_range_summary",
+  "mcp_samsung_health_samsung_health_series",
   "mcp_samsung_health_samsung_health_wellness_context",
   "mcp_samsung_health_samsung_health_list_records",
   "mcp_samsung_health_samsung_health_list_workouts"
@@ -30,6 +32,8 @@ const STANDARD_TOOLS = [
   "samsung_health_profile_get",
   "samsung_health_profile_update",
   "samsung_health_quickstart",
+  "samsung_health_range_summary",
+  "samsung_health_series",
   "samsung_health_weekly_summary",
   "samsung_health_wellness_context"
 ];
