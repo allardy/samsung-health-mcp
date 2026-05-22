@@ -17,7 +17,9 @@ async function newClient() {
     args: ['dist/index.js'],
     env: {
       ...process.env,
+      // node:os homedir() reads HOME on POSIX and USERPROFILE on Windows; set both for cross-platform isolation.
       HOME: fakeHome,
+      USERPROFILE: fakeHome,
       SAMSUNG_HEALTH_EXPORT_PATH: exportPath
     }
   });
