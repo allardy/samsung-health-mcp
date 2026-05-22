@@ -708,3 +708,540 @@ describe("listRecords query options", () => {
     expect(records[0].numeric_value).toBe(88);
   });
 });
+
+// ─── detectDelimiter ──────────────────────────────────────────────────────────
+
+describe("detectDelimiter", () => {
+  it("parses a semicolon-delimited CSV (European locale)", async () => {
+    const csv = [
+      `com.samsung.shealth.tracker.heart_rate;1;1`,
+      "start_time;heart_rate;end_time",
+      "2026-05-20 08:00:00.000;72;2026-05-20 08:00:30.000"
+    ].join("\n");
+    await writeCsv("com.samsung.shealth.tracker.heart_rate.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_heart_rate");
+    expect(record.numeric_value).toBe(72);
+  });
+
+  it("parses a tab-delimited CSV", async () => {
+    const csv = [
+      "com.samsung.shealth.tracker.heart_rate\t1\t1",
+      "start_time\theart_rate\tend_time",
+      "2026-05-20 08:00:00.000\t72\t2026-05-20 08:00:30.000"
+    ].join("\n");
+    await writeCsv("com.samsung.shealth.tracker.heart_rate.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.numeric_value).toBe(72);
+  });
+});
+
+// ─── parseNumber edge cases ────────────────────────────────────────────────────
+
+describe("parseNumber edge cases", () => {
+  it("rejects 'null', 'NaN', 'none', 'unknown' as sentinel non-numbers", async () => {
+    const csv = samsungCsv(
+      "tracker.heart_rate",
+      ["start_time", "heart_rate", "end_time"],
+      [
+        ["2026-05-20 08:00:00.000", "null", "2026-05-20 08:00:30.000"],
+        ["2026-05-20 08:01:00.000", "NaN", "2026-05-20 08:01:30.000"],
+        ["2026-05-20 08:02:00.000", "none", "2026-05-20 08:02:30.000"],
+        ["2026-05-20 08:03:00.000", "unknown", "2026-05-20 08:03:30.000"],
+        ["2026-05-20 08:04:00.000", "75", "2026-05-20 08:04:30.000"]
+      ]
+    );
+    await writeCsv("com.samsung.shealth.tracker.heart_rate.csv", csv);
+
+    const records = await listRecords({ exportPath: workspace, limit: 10 });
+    const values = records.map((r) => r.numeric_value);
+    // Sentinel values are parsed to undefined; only the real number remains.
+    expect(values.filter((v) => v !== undefined)).toEqual([75]);
+  });
+
+  it("strips thousand-separator commas from numeric values", async () => {
+    // Quoted so the field-splitter sees "12,345" as one cell; parseNumber then strips the comma.
+    const csv = [
+      `com.samsung.shealth.pedometer_day_summary,1,1`,
+      "start_time,end_time,step_count",
+      `2026-05-20 00:00:00.000,2026-05-20 23:59:59.000,"12,345"`
+    ].join("\n");
+    await writeCsv("com.samsung.shealth.pedometer_day_summary.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_step_daily",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(12345);
+  });
+
+  it("parses decimal values", async () => {
+    const csv = samsungCsv(
+      "weight",
+      ["start_time", "weight", "end_time"],
+      [["2026-05-20 08:00:00.000", "74.523", "2026-05-20 08:00:01.000"]]
+    );
+    await writeCsv("com.samsung.shealth.weight.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_body_weight",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(74.523);
+  });
+});
+
+// ─── durationMinutes branches ──────────────────────────────────────────────────
+
+describe("durationMinutes (sleep / nap / explicit duration columns)", () => {
+  it("interprets an explicit duration > 100 000 as milliseconds", async () => {
+    // 7 200 000 ms = 120 minutes
+    const csv = samsungCsv(
+      "sleep",
+      ["start_time", "end_time", "duration"],
+      [["2026-05-20 23:00:00.000", "2026-05-21 01:00:00.000", "7200000"]]
+    );
+    await writeCsv("com.samsung.shealth.sleep.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_sleep",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(120);
+  });
+
+  it("interprets an explicit duration between 1 000 and 100 000 as seconds", async () => {
+    // 1800 s = 30 min
+    const csv = samsungCsv(
+      "vitality.nap_data",
+      ["start_time", "end_time", "duration"],
+      [["2026-05-20 14:00:00.000", "2026-05-20 14:30:00.000", "1800"]]
+    );
+    await writeCsv("com.samsung.shealth.vitality.nap_data.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_nap",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(30);
+  });
+
+  it("interprets an explicit duration ≤ 1 000 as minutes", async () => {
+    const csv = samsungCsv(
+      "sleep",
+      ["start_time", "end_time", "duration"],
+      [["2026-05-20 23:00:00.000", "2026-05-21 07:00:00.000", "480"]]
+    );
+    await writeCsv("com.samsung.shealth.sleep.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_sleep",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(480);
+  });
+
+  it("computes duration from start/end when no duration column exists", async () => {
+    const csv = samsungCsv(
+      "sleep",
+      ["start_time", "end_time"],
+      [["2026-05-20 23:00:00.000", "2026-05-21 06:30:00.000"]] // 450 min
+    );
+    await writeCsv("com.samsung.shealth.sleep.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_sleep",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(450);
+  });
+});
+
+// ─── normalizeDistance ─────────────────────────────────────────────────────────
+
+describe("normalizeDistance unit handling", () => {
+  it("auto-divides values > 100 as metres → km", async () => {
+    const csv = samsungCsv(
+      "exercise",
+      ["start_time", "end_time", "exercise_type", "distance"],
+      [["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000", "1002", "5234"]]
+    );
+    await writeCsv("com.samsung.shealth.exercise.csv", csv);
+
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    // round() truncates to 2 decimals — 5234 m → 5.234 km → 5.23.
+    expect(workout.totalDistance).toBe(5.23);
+  });
+
+  it("keeps small values (< 100) as-is treating them as km", async () => {
+    const csv = samsungCsv(
+      "exercise",
+      ["start_time", "end_time", "exercise_type", "distance"],
+      [["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000", "1002", "5.2"]]
+    );
+    await writeCsv("com.samsung.shealth.exercise.csv", csv);
+
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.totalDistance).toBe(5.2);
+  });
+
+  it("converts miles to km when distance_unit indicates miles", async () => {
+    const csv = samsungCsv(
+      "exercise",
+      ["start_time", "end_time", "exercise_type", "distance", "distance_unit"],
+      [["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000", "1002", "3", "mile"]]
+    );
+    await writeCsv("com.samsung.shealth.exercise.csv", csv);
+
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    // 3 miles ≈ 4.83 km (3 × 1.609344)
+    expect(workout.totalDistance).toBeCloseTo(4.828, 2);
+  });
+});
+
+// ─── inferRecordType: sleep family + specialised signals ──────────────────────
+
+describe("inferRecordType: full sleep family routing", () => {
+  it.each([
+    ["sleep_apnea", "samsung_health_sleep_apnea"],
+    ["sleep_goal", "samsung_health_sleep_goal"],
+    ["sleep_raw_data", "samsung_health_sleep_raw"],
+    ["sleep_snoring", "samsung_health_sleep_snoring"]
+  ])("classifies %s.csv as %s (not plain sleep)", async (table, expectedType) => {
+    const csv = samsungCsv(
+      table,
+      ["start_time", "end_time"],
+      [["2026-05-20 23:00:00.000", "2026-05-21 06:00:00.000"]]
+    );
+    await writeCsv(`com.samsung.shealth.${table}.csv`, csv);
+
+    const records = await listRecords({ exportPath: workspace, limit: 10 });
+    const types = records.map((r) => r.type);
+    expect(types).toContain(expectedType);
+    expect(types).not.toContain("samsung_health_sleep");
+  });
+
+  it("classifies vitality.nap_data.csv as nap (not sleep)", async () => {
+    const csv = samsungCsv(
+      "vitality.nap_data",
+      ["start_time", "end_time"],
+      [["2026-05-20 14:00:00.000", "2026-05-20 14:30:00.000"]]
+    );
+    await writeCsv("com.samsung.shealth.vitality.nap_data.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_nap");
+  });
+
+  it("classifies alerted_stress.csv as alerted_stress (not plain stress)", async () => {
+    const csv = samsungCsv(
+      "alerted_stress",
+      ["start_time", "end_time", "score"],
+      [["2026-05-20 10:00:00.000", "2026-05-20 10:05:00.000", "75"]]
+    );
+    await writeCsv("com.samsung.shealth.alerted_stress.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_alerted_stress");
+    expect(record.type).not.toBe("samsung_health_stress");
+  });
+
+  it("classifies stress_histogram.csv as stress_histogram (not plain stress)", async () => {
+    // stress.histogram.csv would normalise to "stress_histogram".
+    const csv = samsungCsv(
+      "stress.histogram",
+      ["start_time", "end_time"],
+      [["2026-05-20 10:00:00.000", "2026-05-20 11:00:00.000"]]
+    );
+    await writeCsv("com.samsung.shealth.stress.histogram.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_stress_histogram");
+  });
+
+  it("classifies calibration_blood_pressure.csv as blood_pressure", async () => {
+    const csv = samsungCsv(
+      "calibration_blood_pressure",
+      ["start_time", "end_time", "systolic"],
+      [["2026-05-20 08:00:00.000", "2026-05-20 08:00:30.000", "120"]]
+    );
+    await writeCsv("com.samsung.shealth.calibration_blood_pressure.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_blood_pressure");
+  });
+
+  it("classifies breathing.csv as breathing_exercise", async () => {
+    const csv = samsungCsv(
+      "breathing",
+      ["start_time", "end_time"],
+      [["2026-05-20 08:00:00.000", "2026-05-20 08:05:00.000"]]
+    );
+    await writeCsv("com.samsung.shealth.breathing.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_breathing_exercise");
+  });
+
+  it("routes cycle.daily_temperature.raw.csv to skin_temperature", async () => {
+    const csv = samsungCsv(
+      "cycle.daily_temperature.raw",
+      ["start_time", "end_time", "temperature"],
+      [["2026-05-20 07:00:00.000", "2026-05-20 07:01:00.000", "36.5"]]
+    );
+    await writeCsv("com.samsung.shealth.cycle.daily_temperature.raw.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_skin_temperature");
+  });
+
+  it("administrative tables (badge/rewards/insight/preferences/permission/social) get distinct types", async () => {
+    const tables: Array<[string, string]> = [
+      ["badge", "samsung_health_badge"],
+      ["rewards", "samsung_health_rewards"],
+      ["insight_message", "samsung_health_insight"],
+      ["preferences", "samsung_health_preferences"],
+      ["permission", "samsung_health_permission"],
+      ["social.public_challenge", "samsung_health_social"],
+      ["report", "samsung_health_report"],
+      ["device_profile", "samsung_health_device_profile"],
+      ["user_profile", "samsung_health_user_profile"]
+    ];
+    for (const [table, _] of tables) {
+      await writeCsv(
+        `com.samsung.shealth.${table}.csv`,
+        samsungCsv(table, ["start_time", "end_time"], [
+          ["2026-05-20 08:00:00.000", "2026-05-20 08:01:00.000"]
+        ])
+      );
+    }
+    const records = await listRecords({ exportPath: workspace, limit: 100 });
+    const seen = new Set(records.map((r) => r.type));
+    for (const [, expected] of tables) {
+      expect(seen).toContain(expected);
+    }
+    // None of these should ever appear under a health-data type.
+    for (const t of seen) {
+      expect(t).not.toBe("samsung_health_heart_rate");
+      expect(t).not.toBe("samsung_health_sleep");
+    }
+  });
+});
+
+// ─── HRV / movement: binning_data sidecar files ───────────────────────────────
+
+describe("HRV and movement records (JSON sidecar tables)", () => {
+  it("HRV records are emitted with start/end dates even though numeric values live in JSON sidecars", async () => {
+    // The HRV CSV references binning_data JSON files for the actual RMSSD/SDNN values.
+    // The parser should still classify the row and capture timing so the timestamps are usable.
+    const csv = samsungCsv(
+      "hrv",
+      ["start_time", "end_time", "binning_data", "time_offset"],
+      [["2024-12-22 08:00:00.000", "2024-12-22 09:00:00.000", "781e0212.binning_data.json", "UTC-0500"]]
+    );
+    await writeCsv("com.samsung.health.hrv.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_hrv",
+      limit: 10
+    });
+    expect(record).toBeDefined();
+    expect(record.type).toBe("samsung_health_hrv");
+    expect(record.startDate).toBe("2024-12-22T13:00:00.000Z");
+    expect(record.endDate).toBe("2024-12-22T14:00:00.000Z");
+    // No numeric_value is expected — values live in the JSON sidecar.
+    expect(record.numeric_value).toBeUndefined();
+  });
+
+  it("HRV with explicit rmssd column takes priority over sdnn and 'average'", async () => {
+    const csv = samsungCsv(
+      "hrv",
+      ["start_time", "end_time", "rmssd", "sdnn", "average"],
+      [["2024-12-22 08:00:00.000", "2024-12-22 09:00:00.000", "42", "55", "999"]]
+    );
+    await writeCsv("com.samsung.health.hrv.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_hrv",
+      limit: 10
+    });
+    expect(record.numeric_value).toBe(42);
+    expect(record.unit).toBe("ms");
+  });
+
+  it("movement records are classified even when only binning_data is present", async () => {
+    const csv = samsungCsv(
+      "movement",
+      ["start_time", "end_time", "binning_data"],
+      [["2024-12-21 23:31:00.000", "2024-12-21 23:59:59.999", "3e6f7dec.binning_data.json"]]
+    );
+    await writeCsv("com.samsung.health.movement.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_movement");
+  });
+});
+
+// ─── decodeExerciseType extras ────────────────────────────────────────────────
+
+describe("decodeExerciseType", () => {
+  it("decodes cycling code 11007", async () => {
+    await writeCsv(
+      "com.samsung.shealth.exercise.csv",
+      samsungCsv("exercise", ["start_time", "end_time", "exercise_type"], [
+        ["2026-05-20 09:00:00.000", "2026-05-20 10:00:00.000", "11007"]
+      ])
+    );
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.workoutActivityType).toBe("cycling");
+  });
+
+  it("decodes hiking code 14001", async () => {
+    await writeCsv(
+      "com.samsung.shealth.exercise.csv",
+      samsungCsv("exercise", ["start_time", "end_time", "exercise_type"], [
+        ["2026-05-20 09:00:00.000", "2026-05-20 10:00:00.000", "14001"]
+      ])
+    );
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.workoutActivityType).toBe("hiking");
+  });
+
+  it("decodes legacy free_exercise code 0", async () => {
+    await writeCsv(
+      "com.samsung.shealth.exercise.csv",
+      samsungCsv("exercise", ["start_time", "end_time", "exercise_type"], [
+        ["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000", "0"]
+      ])
+    );
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.workoutActivityType).toBe("free_exercise");
+  });
+
+  it("returns 'samsung_exercise_<N>' for unknown numeric codes", async () => {
+    await writeCsv(
+      "com.samsung.shealth.exercise.csv",
+      samsungCsv("exercise", ["start_time", "end_time", "exercise_type"], [
+        ["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000", "99999"]
+      ])
+    );
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.workoutActivityType).toBe("samsung_exercise_99999");
+  });
+
+  it("lowercases a free-text exercise type string", async () => {
+    await writeCsv(
+      "com.samsung.shealth.exercise.csv",
+      samsungCsv("exercise", ["start_time", "end_time", "exercise_type"], [
+        ["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000", "Yoga"]
+      ])
+    );
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.workoutActivityType).toBe("yoga");
+  });
+
+  it("falls back to 'exercise' when no exercise_type column exists", async () => {
+    await writeCsv(
+      "com.samsung.shealth.exercise.csv",
+      samsungCsv("exercise", ["start_time", "end_time"], [
+        ["2026-05-20 09:00:00.000", "2026-05-20 09:30:00.000"]
+      ])
+    );
+    const [workout] = await listWorkouts({ exportPath: workspace, limit: 10 });
+    expect(workout.workoutActivityType).toBe("exercise");
+  });
+});
+
+// ─── sleep record value semantics ─────────────────────────────────────────────
+
+describe("sleep record text value", () => {
+  it("plain sleep records carry value='asleep' regardless of row content", async () => {
+    const csv = samsungCsv(
+      "sleep",
+      ["start_time", "end_time"],
+      [["2026-05-20 23:00:00.000", "2026-05-21 06:00:00.000"]]
+    );
+    await writeCsv("com.samsung.shealth.sleep.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_sleep",
+      limit: 10
+    });
+    expect(record.value).toBe("asleep");
+  });
+
+  it("sleep_stage with unknown numeric code passes the code through unchanged", async () => {
+    const csv = samsungCsv(
+      "sleep_stage",
+      ["start_time", "end_time", "stage"],
+      [["2026-05-20 23:00:00.000", "2026-05-21 00:00:00.000", "99999"]]
+    );
+    await writeCsv("com.samsung.shealth.sleep_stage.csv", csv);
+
+    const [record] = await listRecords({
+      exportPath: workspace,
+      type: "samsung_health_sleep_stage",
+      limit: 10
+    });
+    // Unknown stage codes fall through unchanged so we don't silently relabel them.
+    expect(record.value).toBe("99999");
+  });
+});
+
+// ─── sourceName extraction ────────────────────────────────────────────────────
+
+describe("sourceName extraction", () => {
+  it("uses the row's source/device/pkg_name over the file name", async () => {
+    const csv = samsungCsv(
+      "tracker.heart_rate",
+      ["start_time", "heart_rate", "end_time", "pkg_name"],
+      [["2026-05-20 08:00:00.000", "72", "2026-05-20 08:00:30.000", "com.sec.android.app.shealth"]]
+    );
+    await writeCsv("com.samsung.shealth.tracker.heart_rate.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.sourceName).toBe("com.sec.android.app.shealth");
+  });
+
+  it("falls back to the source file name when no source column is present", async () => {
+    const csv = samsungCsv(
+      "tracker.heart_rate",
+      ["start_time", "heart_rate", "end_time"],
+      [["2026-05-20 08:00:00.000", "72", "2026-05-20 08:00:30.000"]]
+    );
+    await writeCsv("com.samsung.shealth.tracker.heart_rate.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.sourceName).toContain("tracker.heart_rate");
+  });
+});
+
+// ─── unknown samsung table fallback ───────────────────────────────────────────
+
+describe("default classification fallback", () => {
+  it("synthesises 'samsung_health_<safe_type>' for an unrecognised samsung table", async () => {
+    // A file we don't have a specific rule for — should still get a sensible type rather than
+    // disappearing entirely (the inferRecordType fallback path).
+    const csv = samsungCsv(
+      "experimental_metric",
+      ["start_time", "end_time", "score"],
+      [["2026-05-20 08:00:00.000", "2026-05-20 08:01:00.000", "42"]]
+    );
+    await writeCsv("com.samsung.shealth.experimental_metric.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toMatch(/^samsung_health_/);
+    expect(record.type).toContain("experimental");
+  });
+});
