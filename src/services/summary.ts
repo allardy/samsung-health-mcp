@@ -212,13 +212,17 @@ function buildWeeklyTrends(daily: Array<ReturnType<typeof summarizeDay>>) {
 }
 
 function sleepBreakdown(records: SamsungHealthRecord[]) {
-  const stageRecords = records.filter((record) => record.type === "samsung_health_sleep" || record.type === "samsung_health_sleep_stage");
+  // Prefer the stage breakdown when available; fall back to whole-session records.
+  // Summing both double-counts since stages partition the session.
+  const stageRecords = records.filter((record) => record.type === "samsung_health_sleep_stage");
+  const sessionRecords = records.filter((record) => record.type === "samsung_health_sleep");
+  const sourceRecords = stageRecords.length > 0 ? stageRecords : sessionRecords;
   const stages: Record<string, number> = {};
   let minutesAsleep = 0;
   let minutesInBed = 0;
   let minutesAwake = 0;
 
-  for (const record of stageRecords) {
+  for (const record of sourceRecords) {
     const minutes = recordDurationMinutes(record);
     const stage = sleepStageName(record.value);
     stages[stage] = round((stages[stage] ?? 0) + minutes) ?? 0;
