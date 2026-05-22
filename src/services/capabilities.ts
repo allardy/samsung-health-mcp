@@ -23,11 +23,17 @@ export function buildCapabilities() {
       ]
     },
     supported_data: [
-      { name: "Activity", examples: ["steps", "distance", "active energy"], tools: ["samsung_health_list_records", "samsung_health_daily_summary"] },
-      { name: "Heart", examples: ["heart rate", "resting heart rate", "HRV SDNN"], tools: ["samsung_health_list_records", "samsung_health_daily_summary"] },
-      { name: "Sleep", examples: ["sleep analysis categories and durations"], tools: ["samsung_health_list_records", "samsung_health_daily_summary", "samsung_health_wellness_context"] },
-      { name: "Workouts", examples: ["activity type", "duration", "distance", "energy"], tools: ["samsung_health_list_workouts", "samsung_health_weekly_summary"] },
-      { name: "Inventory", examples: ["available date range", "record types", "export freshness"], tools: ["samsung_health_data_inventory"] }
+      { name: "Activity", examples: ["steps", "distance", "active energy", "movement intensity", "floors climbed", "daily activity rollups"], tools: ["samsung_health_list_records", "samsung_health_series", "samsung_health_daily_summary", "samsung_health_range_summary"] },
+      { name: "Heart", examples: ["heart rate", "resting heart rate", "HRV", "alerted high/low HR", "ECG", "blood pressure"], tools: ["samsung_health_list_records", "samsung_health_series", "samsung_health_daily_summary"] },
+      { name: "Respiratory", examples: ["respiratory rate", "SpO2"], tools: ["samsung_health_list_records", "samsung_health_series", "samsung_health_daily_summary"] },
+      { name: "Body", examples: ["body weight", "body fat", "height", "skin temperature"], tools: ["samsung_health_list_records", "samsung_health_series"] },
+      { name: "Sleep", examples: ["sleep sessions", "sleep stages", "combined sleep score", "naps", "sleep apnea events", "snoring"], tools: ["samsung_health_list_records", "samsung_health_daily_summary", "samsung_health_wellness_context"] },
+      { name: "Stress", examples: ["stress score", "alerted stress", "stress histogram"], tools: ["samsung_health_list_records", "samsung_health_series", "samsung_health_daily_summary"] },
+      { name: "Vitality", examples: ["vitality score", "breathing exercise sessions"], tools: ["samsung_health_list_records", "samsung_health_series"] },
+      { name: "Nutrition", examples: ["water intake", "caffeine intake", "food"], tools: ["samsung_health_list_records"] },
+      { name: "Workouts", examples: ["activity type", "duration", "distance", "energy"], tools: ["samsung_health_list_workouts", "samsung_health_weekly_summary", "samsung_health_range_summary"] },
+      { name: "Context", examples: ["Samsung-generated wellness insights", "weekly/monthly reports", "user profile (height, age, goals)"], tools: ["samsung_health_list_records"] },
+      { name: "Inventory", examples: ["available date range", "record types", "export freshness"], tools: ["samsung_health_data_inventory", "samsung_health_export_freshness"] }
     ],
     supported_record_types: SUPPORTED_RECORD_TYPES,
     recommended_agent_flow: [

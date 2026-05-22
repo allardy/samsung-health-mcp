@@ -499,10 +499,28 @@ function metricForRecord(type: string, normalizedFile: string, row: CsvRow, star
       return { value: normalizeDistance(readNumber(row, ["distance", "distance_meter", "distance_m", "distance_km", "value"]), row), unit: "km" };
     case "samsung_health_active_energy":
       return { value: readNumber(row, ["calorie", "calories", "calorie_count", "kcal", "value"]), unit: "kcal" };
+    case "samsung_health_movement":
+      return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_floors_climbed":
+      return { value: readNumber(row, ["floor", "floor_count", "floors", "count", "value"]), unit: "count" };
+    case "samsung_health_height":
+      return { value: readNumber(row, ["height", "value"]), unit: readString(row, ["unit"]) ?? "cm" };
     case "samsung_health_sleep":
       return { value: durationMinutes(row, startDate, endDate), unit: "min" };
     case "samsung_health_sleep_stage":
       return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_sleep_combined":
+      return { value: readNumber(row, ["sleep_score", "score", "total_score", "value"]), unit: "score" };
+    case "samsung_health_sleep_apnea":
+      return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_sleep_snoring":
+      return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_sleep_goal":
+      return { value: readNumber(row, ["sleep_time", "sleep_minutes", "value"]), unit: "min" };
+    case "samsung_health_breathing_exercise":
+      return { value: durationMinutes(row, startDate, endDate), unit: "min" };
+    case "samsung_health_stress_histogram":
+      return { value: readNumber(row, ["base_hr", "value"]), unit: "bpm" };
     case "samsung_health_stress":
       return { value: readNumber(row, ["score", "stress", "average", "value"]), unit: "score" };
     case "samsung_health_alerted_stress":
