@@ -22,7 +22,7 @@ export const ConnectionStatusInputSchema = z.object({
 }).strict();
 
 export const RecordListInputSchema = z.object({
-  type: z.string().optional().describe(`Samsung Health record type, e.g. ${SUPPORTED_RECORD_TYPES[0]}.`),
+  type: z.string().optional().describe(`Samsung Health record type. Accepts canonical names (${SUPPORTED_RECORD_TYPES[0]}), bare names (steps, heart_rate, hrv) and short aliases (hr, spo2, bp, weight, floors). Unknown types throw with the list of known aliases.`),
   start: z.string().optional().describe("Optional ISO date/time lower bound."),
   end: z.string().optional().describe("Optional ISO date/time upper bound."),
   limit: z.number().int().min(1).max(MAX_LIMIT).default(DEFAULT_LIMIT),
@@ -66,7 +66,7 @@ export const SeriesStatSchema = z.enum(["avg", "sum", "min", "max", "median", "p
 export const SeriesBucketSchema = z.enum(["1h", "6h", "1d", "1w", "1m"]).default("1d");
 
 export const SeriesInputSchema = z.object({
-  metric: z.string().min(1).describe("Samsung Health record type to aggregate, e.g. samsung_health_heart_rate, samsung_health_stress, samsung_health_steps, samsung_health_hrv."),
+  metric: z.string().min(1).describe("Samsung Health record type to aggregate. Accepts canonical names (samsung_health_heart_rate, samsung_health_stress, samsung_health_steps, samsung_health_hrv), bare names (steps, heart_rate, hrv) and short aliases (hr, spo2, bp, weight, floors). Unknown metrics throw with the list of known aliases."),
   start: z.string().optional().describe("Optional ISO date/time lower bound. Defaults to a sensible look-back based on the chosen bucket size."),
   end: z.string().optional().describe("Optional ISO date/time upper bound. Defaults to today in the configured timezone."),
   bucket: SeriesBucketSchema,

@@ -1,4 +1,5 @@
 import type { SamsungHealthRecord } from "../types.js";
+import { resolveRecordType } from "./record-types.js";
 import { getExportSnapshot, parseSamsungDate } from "./samsung-health-export.js";
 import {
   type BucketSize,
@@ -27,6 +28,7 @@ interface SeriesPoint {
 }
 
 export async function buildSeries(exportPath: string | undefined, options: SeriesOptions) {
+  const metric = resolveRecordType(options.metric);
   const timezone = options.timezone ?? "UTC";
   const bucket: BucketSize = options.bucket ?? "1d";
   const stat: SeriesStat = options.stat ?? "avg";
@@ -57,7 +59,7 @@ export async function buildSeries(exportPath: string | undefined, options: Serie
   });
 
   const matching = snapshot.records.filter(
-    (record) => record.type === options.metric && record.numeric_value !== undefined
+    (record) => record.type === metric && record.numeric_value !== undefined
   );
 
   const groups = new Map<string, number[]>();
@@ -80,7 +82,7 @@ export async function buildSeries(exportPath: string | undefined, options: Serie
     kind: "series",
     source: "samsung_health_export",
     generated_at: snapshot.generated_at,
-    metric: options.metric,
+    metric,
     stat,
     bucket,
     timezone,

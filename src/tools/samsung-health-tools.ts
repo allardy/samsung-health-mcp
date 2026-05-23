@@ -19,6 +19,7 @@ import { buildCapabilities } from "../services/capabilities.js";
 import { getConfig } from "../services/config.js";
 import { buildConnectionStatus } from "../services/connection-status.js";
 import { listRecords, listWorkouts } from "../services/samsung-health-export.js";
+import { resolveRecordType } from "../services/record-types.js";
 import { bulletList, makeError, makeResponse } from "../services/format.js";
 import {
   buildProfileSummary,
@@ -252,17 +253,20 @@ export function registerSamsungHealthTools(server: McpServer): void {
   }, async (params) => {
     try {
       const config = getConfig();
-      const records = await listRecords({ exportPath: config.exportPath, type: params.type, start: params.start, end: params.end, limit: params.limit, useIncrementalCache: params.incremental_cache === true });
+      // Resolve aliases up front so the echoed `type` reflects the canonical
+      // name (e.g. "hr" → "samsung_health_heart_rate"), helping callers learn.
+      const resolvedType = params.type ? resolveRecordType(params.type) : undefined;
+      const records = await listRecords({ exportPath: config.exportPath, type: resolvedType, start: params.start, end: params.end, limit: params.limit, useIncrementalCache: params.incremental_cache === true });
       const privacyMode = params.privacy_mode ?? config.privacyMode;
       const output = {
         source: "samsung_health_export",
-        type: params.type,
+        type: resolvedType,
         privacy_mode: privacyMode,
         count: records.length,
         ...recordPrivacyView(records, privacyMode, config.timezone)
       };
       return makeResponse(output, params.response_format, bulletList("Samsung Health Records", {
-        type: params.type ?? "any",
+        type: resolvedType ?? "any",
         count: records.length,
         source: "samsung_health_export",
         privacy_mode: privacyMode

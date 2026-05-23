@@ -131,11 +131,19 @@ export function formatRangeSummaryMarkdown(summary: Awaited<ReturnType<typeof bu
 }
 
 function summarizeBucket(key: string, records: SamsungHealthRecord[], workouts: SamsungHealthWorkout[]): BucketSummary {
-  const stepValues = numericValues(records, "samsung_health_steps");
+  // For daily totals, prefer Samsung's own per-day aggregates (step_daily_trend + step_daily,
+  // which sum across all contributing devices the way the Samsung Health app's UI does). Fall
+  // through to activity_daily for days where only that table has coverage, then to instantaneous
+  // pedometer events as a last resort — those come from a single device (typically the watch)
+  // and under-count vs. what the user sees in the app.
+  const stepDailyTrend = numericValues(records, "samsung_health_step_daily_trend");
   const stepDaily = numericValues(records, "samsung_health_step_daily");
-  // Prefer instantaneous step counts when present; fall back to per-day rollups so we
-  // don't double-count older exports that only have daily aggregates.
-  const stepsTotal = stepValues.length > 0 ? sum(stepValues) : sum(stepDaily);
+  const activityDaily = numericValues(records, "samsung_health_activity_daily");
+  const stepValues = numericValues(records, "samsung_health_steps");
+  const stepsTotal = stepDailyTrend.length > 0 ? sum(stepDailyTrend)
+    : stepDaily.length > 0 ? sum(stepDaily)
+    : activityDaily.length > 0 ? sum(activityDaily)
+    : sum(stepValues);
 
   const activeEnergy = sum(numericValues(records, "samsung_health_active_energy"));
   const caloriesDaily = sum(numericValues(records, "samsung_health_calories_daily"));

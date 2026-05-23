@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -325,6 +326,121 @@ describe("time_offset combination", () => {
 
     const [record] = await listRecords({ exportPath: workspace, limit: 10 });
     expect(record.startDate).toBe("2026-05-20T08:00:00.000Z");
+  });
+});
+
+// ─── day_time noon shift for per-day aggregate tables ─────────────────────────
+
+describe("day_time naive-local-midnight handling", () => {
+  // Samsung's per-day aggregate tables (pedometer_day_summary, step_daily_trend,
+  // calories_burned, activity_day_summary, floors_day_summary) store the day key as ms-since-epoch
+  // but expressed as if UTC midnight == local midnight — there's no time_offset column to
+  // recover the actual offset. Without compensation, every day-aggregate row buckets into the
+  // previous calendar day for any user west of UTC. We shift to noon UTC so the resulting
+  // instant lands inside the correct calendar day in any reasonable user timezone.
+  it("places a day_time=2026-05-20T00:00Z record at noon UTC of 2026-05-20", async () => {
+    // 1779235200000 ms = 2026-05-20T00:00:00 UTC (Samsung's encoding of "May 20" local).
+    const csv = samsungCsv(
+      "tracker.pedometer_day_summary",
+      ["day_time", "step_count"],
+      [["1779235200000", "5293"]]
+    );
+    await writeCsv("com.samsung.shealth.tracker.pedometer_day_summary.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_step_daily");
+    expect(record.startDate).toBe("2026-05-20T12:00:00.000Z");
+    expect(record.numeric_value).toBe(5293);
+  });
+
+  it("noon UTC keeps the calendar day stable in both America/Toronto (UTC-4) and Europe/Berlin (UTC+2)", async () => {
+    const csv = samsungCsv(
+      "step_daily_trend",
+      ["day_time", "count"],
+      [["1779235200000", "5293"]]
+    );
+    await writeCsv("com.samsung.shealth.step_daily_trend.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    // 12:00Z on 2026-05-20 is 08:00 EDT (Toronto) and 14:00 CEST (Berlin) — same calendar day in both.
+    const utc = new Date(record.startDate!);
+    expect(utc.toISOString().slice(0, 10)).toBe("2026-05-20");
+  });
+
+  it("does not double-shift records that use start_time + time_offset", async () => {
+    // Sanity check: the new day_time branch must not interfere with the existing start_time path.
+    const csv = samsungCsv(
+      "tracker.heart_rate",
+      ["start_time", "heart_rate", "end_time", "time_offset"],
+      [["2026-05-20 08:00:00.000", "72", "2026-05-20 08:00:30.000", "UTC-0400"]]
+    );
+    await writeCsv("com.samsung.shealth.tracker.heart_rate.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    // local 08:00 at UTC-4 == 12:00Z.
+    expect(record.startDate).toBe("2026-05-20T12:00:00.000Z");
+  });
+
+  it("anchors a date-string day_time at noon UTC of the same calendar day", async () => {
+    // activity.day_summary stores day_time as "2026-04-30 00:00:00.000" (naive local-midnight
+    // formatted as a string). The old code parsed it as UTC midnight and then bucketers in
+    // any non-UTC timezone pushed the record into the previous day.
+    const csv = samsungCsv(
+      "activity.day_summary",
+      ["day_time", "step_count"],
+      [["2026-04-30 00:00:00.000", "2462"]]
+    );
+    await writeCsv("com.samsung.shealth.activity.day_summary.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_activity_daily");
+    expect(record.startDate).toBe("2026-04-30T12:00:00.000Z");
+  });
+
+  it("extracts HRV value from the sidecar binning JSON when the CSV column is empty", async () => {
+    // Samsung exports keep HRV per-30s bins in a separate JSON sidecar; the CSV only has
+    // start_time, end_time, time_offset and a `binning_data` column pointing at the JSON.
+    // The parser should read the JSON, average rmssd across bins, and use that as the value.
+    const csv = samsungCsv(
+      "hrv",
+      ["start_time", "end_time", "time_offset", "binning_data"],
+      [["2026-05-20 04:00:00.000", "2026-05-20 05:00:00.000", "UTC-0400", "abc123.binning_data.json"]]
+    );
+    await writeCsv("com.samsung.health.hrv.csv", csv);
+    // RMSSD values: 20, 25, 30 → avg 25
+    const jsonPath = join(workspace, "jsons", "com.samsung.health.hrv", "5", "abc123.binning_data.json");
+    await mkdir(dirname(jsonPath), { recursive: true });
+    await writeFile(
+      jsonPath,
+      JSON.stringify([
+        { start_time: 1, end_time: 2, sdnn: 17, rmssd: 20 },
+        { start_time: 2, end_time: 3, sdnn: 18, rmssd: 25 },
+        { start_time: 3, end_time: 4, sdnn: 19, rmssd: 30 }
+      ]),
+      "utf8"
+    );
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_hrv");
+    expect(record.numeric_value).toBe(25);
+    expect(record.unit).toBe("ms");
+  });
+
+  it("anchors a prefixed numeric day_time column at noon UTC", async () => {
+    // calories_burned.details uses the prefixed column name
+    // `com.samsung.shealth.calories_burned.day_time`. Our matcher must accept any column
+    // whose normalised name ends with `_day_time`, not only the literal `day_time`.
+    const csv = samsungCsv(
+      "calories_burned.details",
+      ["com.samsung.shealth.calories_burned.day_time", "com.samsung.shealth.calories_burned.active_calorie"],
+      [["1779235200000", "350"]]
+    );
+    await writeCsv("com.samsung.shealth.calories_burned.details.csv", csv);
+
+    const [record] = await listRecords({ exportPath: workspace, limit: 10 });
+    expect(record.type).toBe("samsung_health_calories_daily");
+    expect(record.startDate).toBe("2026-05-20T12:00:00.000Z");
+    expect(record.numeric_value).toBe(350);
   });
 });
 

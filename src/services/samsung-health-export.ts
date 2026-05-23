@@ -4,6 +4,7 @@ import type { Readable } from "node:stream";
 import yauzl from "yauzl";
 import { DEFAULT_LIMIT, MAX_LIMIT } from "../constants.js";
 import type { SamsungHealthRecord, SamsungHealthWorkout } from "../types.js";
+import { resolveRecordType } from "./record-types.js";
 import { parseFlexibleDate } from "./time.js";
 import {
   getLastParsedAt,
@@ -72,6 +73,15 @@ interface CsvSource {
   text: string;
   size_bytes?: number;
   modified_at?: string;
+}
+
+interface ExportSources {
+  csv: CsvSource[];
+  // Indexed by basename (e.g. "5dd628ad-….binning_data.json"). Only contains files Samsung
+  // references from a CSV's `binning_data` column — currently HRV; other record types
+  // (oxygen_saturation, stress, heart_rate, …) carry their numeric values directly in the CSV
+  // and don't need the JSON sidecars, so we skip those to keep memory bounded.
+  binningJsons: Map<string, string>;
 }
 
 interface EntityVisitor {
@@ -167,15 +177,16 @@ export async function listRecords(query: RecordQuery): Promise<SamsungHealthReco
   if (!location.exists) throw new Error(location.note ?? "Samsung Health export not found.");
   const start = query.start ? parseSamsungDate(query.start) : undefined;
   const end = query.end ? parseSamsungDate(query.end) : undefined;
+  const resolvedType = query.type ? resolveRecordType(query.type) : undefined;
   const records: SamsungHealthRecord[] = [];
 
   let incrementalCutoff: Date | undefined;
   let useIncremental = false;
   const cachePath = location.resolved_path ?? location.input_path;
-  if (query.useIncrementalCache && query.type && cachePath) {
+  if (query.useIncrementalCache && resolvedType && cachePath) {
     useIncremental = true;
     await invalidateIfExportChanged(cachePath, location.mtime_ms);
-    const cached = await getLastParsedAt(query.type);
+    const cached = await getLastParsedAt(resolvedType);
     if (cached) {
       const parsed = parseSamsungDate(cached);
       if (parsed) incrementalCutoff = parsed;
@@ -185,7 +196,7 @@ export async function listRecords(query: RecordQuery): Promise<SamsungHealthReco
   let newestSeenMs = 0;
   await parseExportEntities(location, {
     onRecord(record) {
-      if (query.type && record.type !== query.type) return false;
+      if (resolvedType && record.type !== resolvedType) return false;
       if (!overlaps(record.startDate, record.endDate, start, end)) return false;
       if (incrementalCutoff) {
         const recordStart = parseSamsungDate(record.startDate);
@@ -200,11 +211,11 @@ export async function listRecords(query: RecordQuery): Promise<SamsungHealthReco
     }
   });
 
-  if (useIncremental && query.type && newestSeenMs > 0 && cachePath) {
+  if (useIncremental && resolvedType && newestSeenMs > 0 && cachePath) {
     const cache = await loadCache();
     cache.export_path = cachePath;
     cache.export_mtime_ms = location.mtime_ms;
-    cache.categories[query.type] = new Date(newestSeenMs).toISOString();
+    cache.categories[resolvedType] = new Date(newestSeenMs).toISOString();
     await saveCache(cache);
   }
 
@@ -312,9 +323,9 @@ export function recordOverlaps(startValue: string | undefined, endValue: string 
 }
 
 async function parseExportEntities(location: ExportLocation, visitor: EntityVisitor): Promise<void> {
-  const sources = await readCsvSources(location);
+  const sources = await readExportSources(location);
   let stopped = false;
-  for (const source of sources) {
+  for (const source of sources.csv) {
     if (stopped) break;
     const rows = parseCsv(source.text);
     for (const row of rows) {
@@ -324,13 +335,49 @@ async function parseExportEntities(location: ExportLocation, visitor: EntityVisi
         stopped = visitor.onWorkout?.(workout) ?? false;
         continue;
       }
-      const record = rowToRecord(source.name, row);
+      const record = rowToRecord(source.name, row, sources.binningJsons);
       if (record) stopped = visitor.onRecord?.(record) ?? false;
+      if (stopped) break;
+      for (const secondary of rowToSecondaryRecords(source.name, row, record)) {
+        stopped = visitor.onRecord?.(secondary) ?? false;
+        if (stopped) break;
+      }
     }
   }
 }
 
-function rowToRecord(sourceName: string, row: CsvRow): SamsungHealthRecord | undefined {
+// Some Samsung tables carry multiple metrics in a single row (e.g. step_daily_trend has both a
+// step count and a distance column). The primary record captures the file's defining metric
+// (steps for step_daily_trend); this helper emits additional records for secondary metrics so
+// callers can query them via `samsung_health_series` / aggregate them via the daily/range
+// summaries the same way as primary metrics.
+function rowToSecondaryRecords(sourceName: string, row: CsvRow, primary: SamsungHealthRecord | undefined): SamsungHealthRecord[] {
+  if (!primary) return [];
+  const extras: SamsungHealthRecord[] = [];
+  // Distance: only emit from step_daily_trend. The pedometer_day_summary table holds the same
+  // values for the same days and emitting from both would double-count when both files exist
+  // in an export (the usual case). step_daily_trend's `distance` column is always in metres —
+  // skip the magnitude-based unit guess in normalizeDistance (which would mis-classify short
+  // distances like 18 m as 18 km).
+  if (primary.type === "samsung_health_step_daily_trend") {
+    const meters = readNumber(row, ["distance", "distance_meter", "distance_m"]);
+    if (meters !== undefined && meters > 0) {
+      const km = round(meters / 1000);
+      if (km !== undefined && km > 0) {
+        extras.push({
+          ...primary,
+          type: "samsung_health_distance",
+          unit: "km",
+          value: String(km),
+          numeric_value: km
+        });
+      }
+    }
+  }
+  return extras;
+}
+
+function rowToRecord(sourceName: string, row: CsvRow, binningJsons?: Map<string, string>): SamsungHealthRecord | undefined {
   const normalizedFile = normalizeKey(sourceName);
   const type = inferRecordType(normalizedFile, row);
   if (!type) return undefined;
@@ -338,7 +385,7 @@ function rowToRecord(sourceName: string, row: CsvRow): SamsungHealthRecord | und
   const startDate = bestDate(row, DATE_KEYS.start);
   const endDate = bestDate(row, DATE_KEYS.end) ?? startDate;
   const creationDate = bestDate(row, DATE_KEYS.created);
-  const metric = metricForRecord(type, normalizedFile, row, startDate, endDate);
+  const metric = metricForRecord(type, normalizedFile, row, startDate, endDate, binningJsons);
   if (metric.value === undefined && !startDate && !endDate) return undefined;
   let textValue: string | undefined;
   if (type === "samsung_health_sleep") {
@@ -466,7 +513,7 @@ function inferRecordType(normalizedFile: string, row: CsvRow): string | undefine
   return undefined;
 }
 
-function metricForRecord(type: string, normalizedFile: string, row: CsvRow, startDate?: string, endDate?: string): { value?: number; unit?: string } {
+function metricForRecord(type: string, normalizedFile: string, row: CsvRow, startDate?: string, endDate?: string, binningJsons?: Map<string, string>): { value?: number; unit?: string } {
   switch (type) {
     case "samsung_health_steps":
       return { value: readNumber(row, ["step_count", "count", "steps", "value"]), unit: "count" };
@@ -485,8 +532,20 @@ function metricForRecord(type: string, normalizedFile: string, row: CsvRow, star
       return { value: readNumber(row, ["heart_rate", "bpm", "max", "min", "value"]), unit: "bpm" };
     case "samsung_health_resting_heart_rate":
       return { value: readNumber(row, ["resting_heart_rate", "resting_hr", "heart_rate", "bpm", "value"]), unit: "bpm" };
-    case "samsung_health_hrv":
-      return { value: readNumber(row, ["rmssd", "sdnn", "hrv", "average", "value"]), unit: "ms" };
+    case "samsung_health_hrv": {
+      // Recent Samsung exports keep HRV values in JSON sidecar files referenced from the CSV's
+      // `binning_data` column; the CSV itself only carries timing + the JSON filename. Try
+      // direct CSV columns first (older exports / future formats) and fall back to averaging
+      // RMSSD across the bins in the sidecar JSON.
+      const direct = readNumber(row, ["rmssd", "sdnn", "hrv", "average", "value"]);
+      if (direct !== undefined) return { value: direct, unit: "ms" };
+      const binningFile = readString(row, ["binning_data"]);
+      if (binningFile && binningJsons) {
+        const avg = averageRmssdFromBinning(binningJsons.get(binningFile));
+        if (avg !== undefined) return { value: avg, unit: "ms" };
+      }
+      return { value: undefined, unit: "ms" };
+    }
     case "samsung_health_oxygen_saturation":
       return { value: readNumber(row, ["spo2", "oxygen_saturation", "saturation", "average", "min", "value"]), unit: "%" };
     case "samsung_health_respiratory_rate":
@@ -561,48 +620,73 @@ function normalizeLimit(value: number | undefined): number {
   return Math.min(Math.max(Math.trunc(value), 1), MAX_LIMIT);
 }
 
-async function readCsvSources(location: ExportLocation): Promise<CsvSource[]> {
+// Only load JSON sidecars whose path indicates they're HRV bins — that's the one record type
+// whose numeric value lives outside the CSV. Other types (heart_rate, oxygen_saturation, etc.)
+// also have JSON sidecars but we don't need them, and loading them would cost ~400 MB on a
+// typical multi-year export. The check matches both nested-original-zip paths
+// (`jsons/com.samsung.health.hrv/5/<uuid>.binning_data.json`) and flat extracts where the
+// user re-archives JSONs alongside CSVs.
+function isHrvBinningPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  if (!lower.endsWith(".binning_data.json")) return false;
+  return lower.includes("com.samsung.health.hrv");
+}
+
+async function readExportSources(location: ExportLocation): Promise<ExportSources> {
   if (location.kind === "csv" && location.resolved_path) {
-    return [{
-      name: basename(location.resolved_path),
-      text: await fs.readFile(location.resolved_path, "utf8"),
-      size_bytes: location.size_bytes,
-      modified_at: location.modified_at
-    }];
+    return {
+      csv: [{
+        name: basename(location.resolved_path),
+        text: await fs.readFile(location.resolved_path, "utf8"),
+        size_bytes: location.size_bytes,
+        modified_at: location.modified_at
+      }],
+      binningJsons: new Map()
+    };
   }
-  if (location.kind === "directory" && location.resolved_path) return readDirectoryCsvSources(location.resolved_path);
-  if (location.kind === "zip" && location.resolved_path) return readZipCsvSources(location.resolved_path);
+  if (location.kind === "directory" && location.resolved_path) return readDirectoryExportSources(location.resolved_path);
+  if (location.kind === "zip" && location.resolved_path) return readZipExportSources(location.resolved_path);
   throw new Error(location.note ?? "Unsupported Samsung Health export location.");
 }
 
-async function readDirectoryCsvSources(root: string): Promise<CsvSource[]> {
-  const files = await listCsvFiles(root);
-  return Promise.all(files.map(async (file) => {
-    const stat = await fs.stat(file);
-    return {
-      name: file.slice(root.length + 1),
-      text: await fs.readFile(file, "utf8"),
-      size_bytes: stat.size,
-      modified_at: stat.mtime.toISOString()
-    };
+async function readDirectoryExportSources(root: string): Promise<ExportSources> {
+  const all = await listExportFiles(root);
+  const csv: CsvSource[] = [];
+  const binningJsons = new Map<string, string>();
+  await Promise.all(all.map(async (file) => {
+    const lower = file.toLowerCase();
+    if (lower.endsWith(".csv")) {
+      const stat = await fs.stat(file);
+      csv.push({
+        name: file.slice(root.length + 1),
+        text: await fs.readFile(file, "utf8"),
+        size_bytes: stat.size,
+        modified_at: stat.mtime.toISOString()
+      });
+    } else if (isHrvBinningPath(file)) {
+      binningJsons.set(basename(file), await fs.readFile(file, "utf8"));
+    }
   }));
+  return { csv, binningJsons };
 }
 
-function readZipCsvSources(zipPath: string): Promise<CsvSource[]> {
+function readZipExportSources(zipPath: string): Promise<ExportSources> {
   return new Promise((resolvePromise, reject) => {
     yauzl.open(zipPath, { lazyEntries: true }, (openError, zipfile) => {
       if (openError || !zipfile) {
         reject(openError ?? new Error("Unable to open Samsung Health export zip."));
         return;
       }
-      const sources: CsvSource[] = [];
+      const csv: CsvSource[] = [];
+      const binningJsons = new Map<string, string>();
       zipfile.readEntry();
       zipfile.on("entry", (entry) => {
         const name = entry.fileName.replace(/\\/g, "/");
-        if (!name.toLowerCase().endsWith(".csv") || /\/$/.test(name)) {
-          zipfile.readEntry();
-          return;
-        }
+        if (/\/$/.test(name)) { zipfile.readEntry(); return; }
+        const lower = name.toLowerCase();
+        const isCsv = lower.endsWith(".csv");
+        const isHrvJson = isHrvBinningPath(name);
+        if (!isCsv && !isHrvJson) { zipfile.readEntry(); return; }
         zipfile.openReadStream(entry, (streamError, stream) => {
           if (streamError || !stream) {
             zipfile.close();
@@ -610,7 +694,8 @@ function readZipCsvSources(zipPath: string): Promise<CsvSource[]> {
             return;
           }
           streamToString(stream).then((text) => {
-            sources.push({ name, text, size_bytes: entry.uncompressedSize });
+            if (isCsv) csv.push({ name, text, size_bytes: entry.uncompressedSize });
+            else binningJsons.set(basename(name), text);
             zipfile.readEntry();
           }, (error) => {
             zipfile.close();
@@ -620,7 +705,8 @@ function readZipCsvSources(zipPath: string): Promise<CsvSource[]> {
       });
       zipfile.on("end", () => {
         zipfile.close();
-        resolvePromise(sources.sort((left, right) => left.name.localeCompare(right.name)));
+        csv.sort((left, right) => left.name.localeCompare(right.name));
+        resolvePromise({ csv, binningJsons });
       });
       zipfile.on("error", reject);
     });
@@ -632,6 +718,10 @@ async function countCsvFiles(root: string): Promise<number> {
 }
 
 async function listCsvFiles(root: string): Promise<string[]> {
+  return (await listExportFiles(root)).filter((f) => f.toLowerCase().endsWith(".csv"));
+}
+
+async function listExportFiles(root: string): Promise<string[]> {
   const files: string[] = [];
   async function visit(directory: string, depth: number): Promise<void> {
     if (depth > 6) return;
@@ -645,7 +735,10 @@ async function listCsvFiles(root: string): Promise<string[]> {
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const fullPath = join(directory, entry.name);
       if (entry.isDirectory()) await visit(fullPath, depth + 1);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".csv")) files.push(fullPath);
+      else if (entry.isFile()) {
+        const lower = entry.name.toLowerCase();
+        if (lower.endsWith(".csv") || lower.endsWith(".binning_data.json")) files.push(fullPath);
+      }
     }
   }
   await visit(root, 0);
@@ -748,11 +841,56 @@ function detectDelimiter(line: string): "," | ";" | "\t" {
 }
 
 function bestDate(row: CsvRow, aliases: string[]): string | undefined {
-  const value = readString(row, aliases);
+  const entry = findEntry(row, aliases);
+  if (!entry) return undefined;
+  const [key, rawValue] = entry;
+  const value = rawValue?.trim();
+  if (!value) return undefined;
   const offset = readString(row, ["time_offset"]);
+  // Samsung's per-day aggregate tables (pedometer_day_summary, step_daily_trend,
+  // activity.day_summary, floors_day_summary, calories_burned.details) key rows by a `day_time`
+  // column that has no `time_offset` counterpart and that Samsung populates as if local midnight
+  // == UTC midnight. Without compensation, every row buckets into the previous calendar day for
+  // users west of UTC. The value comes in three flavours across the export:
+  //   - numeric ms ("1779235200000")          — step_daily_trend, pedometer_day_summary, floors_day_summary
+  //   - prefixed numeric                       — calories_burned.details (column: com.samsung.shealth.calories_burned.day_time)
+  //   - naive date string ("2026-05-20 00:00:00.000") — activity.day_summary
+  // Anchor any of those at noon UTC of the inferred calendar day so the record lands in the
+  // correct bucket in every reasonable user timezone (UTC-12 through UTC+12).
+  const normalizedKey = normalizeKey(key);
+  const isDayTimeField = normalizedKey === "day_time" || normalizedKey.endsWith("_day_time");
+  if (isDayTimeField) {
+    const dayIso = parseDayTimeToNoon(value);
+    if (dayIso) return dayIso;
+  }
   const combined = combineDateAndOffset(value, offset);
   const parsed = parseSamsungDate(combined);
   return parsed?.toISOString();
+}
+
+// Resolve a Samsung `day_time` value (numeric ms or "YYYY-MM-DD HH:MM:SS.SSS" string)
+// to noon UTC of the represented calendar day. Returns undefined when the value is unrecognised
+// so the caller can fall back to the standard date-parsing path.
+function parseDayTimeToNoon(value: string): string | undefined {
+  if (/^\d+(\.\d+)?$/.test(value)) {
+    const ms = Number(value);
+    if (Number.isFinite(ms) && ms > 946_684_800_000) {
+      // Use the calendar day of the naive UTC interpretation (not stored-ms + 12h directly,
+      // so DST edges don't drift the date) and anchor at noon UTC.
+      const dayUtc = new Date(ms);
+      if (!Number.isNaN(dayUtc.getTime())) {
+        const anchored = new Date(Date.UTC(dayUtc.getUTCFullYear(), dayUtc.getUTCMonth(), dayUtc.getUTCDate(), 12, 0, 0, 0));
+        return anchored.toISOString();
+      }
+    }
+    return undefined;
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/.exec(value);
+  if (match) {
+    const anchored = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0, 0));
+    if (!Number.isNaN(anchored.getTime()) && anchored.getTime() > 946_684_800_000) return anchored.toISOString();
+  }
+  return undefined;
 }
 
 function combineDateAndOffset(value: string | undefined, offset: string | undefined): string | undefined {
@@ -827,6 +965,30 @@ function durationMinutes(row: CsvRow, startDate?: string, endDate?: string): num
   const end = parseSamsungDate(endDate);
   if (!start || !end) return undefined;
   return round(Math.max(0, end.getTime() - start.getTime()) / 60_000);
+}
+
+// Each HRV binning JSON is an array of ~30-second bins like:
+//   [{ "start_time": …, "end_time": …, "sdnn": 17.27, "rmssd": 20.74 }, …]
+// Average RMSSD across the bins is what most HRV summaries (Whoop, Garmin, Oura) report.
+function averageRmssdFromBinning(rawJson: string | undefined): number | undefined {
+  if (!rawJson) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+  const values: number[] = [];
+  for (const bin of parsed) {
+    if (bin && typeof bin === "object") {
+      const v = (bin as Record<string, unknown>).rmssd;
+      const n = typeof v === "number" ? v : Number(v);
+      if (Number.isFinite(n)) values.push(n);
+    }
+  }
+  if (values.length === 0) return undefined;
+  return round(values.reduce((sum, v) => sum + v, 0) / values.length);
 }
 
 function normalizeDistance(value: number | undefined, row: CsvRow): number | undefined {

@@ -168,4 +168,64 @@ describe("buildSeries", () => {
     expect(series.bucket_count).toBe(0);
     expect(series.points).toEqual([]);
   });
+
+  it("accepts bare metric names and resolves them to canonical types", async () => {
+    await writeCsv(
+      "com.samsung.shealth.tracker.heart_rate.csv",
+      samsungCsv(
+        "tracker.heart_rate",
+        ["start_time", "heart_rate", "end_time"],
+        [["2026-05-20 08:00:00.000", "72", "2026-05-20 08:00:30.000"]]
+      )
+    );
+    const series: any = await buildSeries(workspace, {
+      metric: "heart_rate",
+      start: "2026-05-20",
+      end: "2026-05-20",
+      bucket: "1d",
+      stat: "avg",
+      timezone: "UTC"
+    });
+    expect(series.metric).toBe("samsung_health_heart_rate");
+    expect(series.bucket_count).toBe(1);
+    expect(series.points[0].value).toBe(72);
+  });
+
+  it("accepts short-form aliases like 'hr'", async () => {
+    await writeCsv(
+      "com.samsung.shealth.tracker.heart_rate.csv",
+      samsungCsv(
+        "tracker.heart_rate",
+        ["start_time", "heart_rate", "end_time"],
+        [["2026-05-20 08:00:00.000", "65", "2026-05-20 08:00:30.000"]]
+      )
+    );
+    const series: any = await buildSeries(workspace, {
+      metric: "hr",
+      start: "2026-05-20",
+      end: "2026-05-20",
+      bucket: "1d",
+      stat: "avg",
+      timezone: "UTC"
+    });
+    expect(series.metric).toBe("samsung_health_heart_rate");
+    expect(series.points[0].value).toBe(65);
+  });
+
+  it("throws a clear error for unknown metric names", async () => {
+    await writeCsv(
+      "com.samsung.shealth.tracker.heart_rate.csv",
+      samsungCsv("tracker.heart_rate", ["start_time", "heart_rate"], [["2026-05-20 08:00:00.000", "60"]])
+    );
+    await expect(
+      buildSeries(workspace, {
+        metric: "definitely_not_a_metric",
+        start: "2026-05-20",
+        end: "2026-05-20",
+        bucket: "1d",
+        stat: "avg",
+        timezone: "UTC"
+      })
+    ).rejects.toThrow(/Unknown Samsung Health record type/);
+  });
 });
