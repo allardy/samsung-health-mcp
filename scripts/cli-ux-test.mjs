@@ -24,7 +24,7 @@ try {
     '--json'
   ], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home }
+    env: { ...process.env, HOME: home, USERPROFILE: home }
   });
   assert.equal(setup.status, 0, setup.stderr);
   const payload = JSON.parse(setup.stdout);
@@ -35,7 +35,7 @@ try {
 
   const doctor = spawnSync(process.execPath, ['dist/index.js', 'doctor', '--json'], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home }
+    env: { ...process.env, HOME: home, USERPROFILE: home }
   });
   assert.equal(doctor.status, 0, doctor.stderr);
   const status = JSON.parse(doctor.stdout);
@@ -52,11 +52,13 @@ try {
     '--json'
   ], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: autoHome }
+    // node:os homedir() reads HOME on POSIX and USERPROFILE on Windows; set both for cross-platform isolation.
+    env: { ...process.env, HOME: autoHome, USERPROFILE: autoHome }
   });
   assert.equal(autoSetup.status, 0, autoSetup.stderr);
   const autoPayload = JSON.parse(autoSetup.stdout);
-  assert.ok(autoPayload.import.imported_path.includes('.samsung-health-mcp/exports/samsung-health-export-'));
+  // Normalize backslashes so the assertion works on Windows (path.sep = '\\').
+  assert.ok(autoPayload.import.imported_path.replace(/\\/g, '/').includes('.samsung-health-mcp/exports/samsung-health-export-'));
   assert.ok(existsSync(autoPayload.import.imported_path));
   assert.match(readFileSync(autoPayload.config_path, 'utf8'), /SAMSUNG_HEALTH_LAST_IMPORT_AT/);
   rmSync(autoHome, { recursive: true, force: true });

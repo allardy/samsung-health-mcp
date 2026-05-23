@@ -8,7 +8,8 @@ const client = new Client({ name: 'samsung-health-export-test', version: '0.0.0'
 const transport = new StdioClientTransport({
   command: 'node',
   args: ['dist/index.js'],
-  env: { ...process.env, SAMSUNG_HEALTH_EXPORT_PATH: exportPath }
+  // Pin the privacy mode so a developer's local ~/.samsung-health-mcp/config.json doesn't shift assertions.
+  env: { ...process.env, SAMSUNG_HEALTH_EXPORT_PATH: exportPath, SAMSUNG_HEALTH_PRIVACY_MODE: 'summary' }
 });
 
 await client.connect(transport);

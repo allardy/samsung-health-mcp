@@ -42,19 +42,20 @@ try {
     '--json'
   ], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home }
+    env: { ...process.env, HOME: home, USERPROFILE: home }
   });
   assert.equal(setup.status, 0, setup.stderr);
   const setupPayload = JSON.parse(setup.stdout);
   assert.equal(setupPayload.client, 'hermes');
-  assert.ok(setupPayload.hermes_skill_path.endsWith('.hermes/skills/samsung-health-mcp/SKILL.md'));
+  // Normalize backslashes so the assertion works on Windows (path.sep = '\\').
+  assert.ok(setupPayload.hermes_skill_path.replace(/\\/g, '/').endsWith('.hermes/skills/samsung-health-mcp/SKILL.md'));
   assert.ok(setupPayload.next_step.includes('/reload-mcp'));
   assert.ok(existsSync(setupPayload.hermes_skill_path));
   assert.match(readFileSync(setupPayload.client_config_path, 'utf8'), new RegExp(pinnedPackage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
   const doctor = spawnSync(process.execPath, ['dist/index.js', 'doctor', '--client', 'hermes', '--json'], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home }
+    env: { ...process.env, HOME: home, USERPROFILE: home }
   });
   assert.equal(doctor.status, 0, doctor.stderr);
   const doctorPayload = JSON.parse(doctor.stdout);
@@ -84,7 +85,7 @@ try {
     '--json'
   ], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: mergeHome }
+    env: { ...process.env, HOME: mergeHome, USERPROFILE: mergeHome }
   });
   assert.equal(mergeSetup.status, 0, mergeSetup.stderr);
   const mergedConfig = readFileSync(join(mergeHome, '.hermes', 'config.yaml'), 'utf8');

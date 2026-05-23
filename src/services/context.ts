@@ -34,7 +34,7 @@ export async function buildWellnessContext(exportPath: string | undefined, optio
     recent_training_load: recentTrainingLoad,
     recovery_signals: {
       resting_bpm: summary.heart.resting_bpm,
-      hrv_sdnn_ms: summary.heart.hrv_sdnn_ms,
+      hrv_rmssd_ms: summary.heart.hrv_rmssd_ms,
       respiratory_rate: summary.heart.respiratory_rate,
       oxygen_saturation: summary.heart.oxygen_saturation
     },
@@ -66,7 +66,7 @@ export async function buildWellnessContext(exportPath: string | undefined, optio
       "Samsung Health wellness context",
       sleepScore !== undefined ? `Sleep: ${sleepScore}` : undefined,
       `Load: ${recentTrainingLoad}`,
-      summary.heart.hrv_sdnn_ms !== undefined ? `HRV: ${summary.heart.hrv_sdnn_ms}` : undefined
+      summary.heart.hrv_rmssd_ms !== undefined ? `HRV: ${summary.heart.hrv_rmssd_ms}` : undefined
     ].filter(Boolean).join(" | ")
   };
 }

@@ -83,7 +83,7 @@ export async function buildWeeklySummary(exportPath: string | undefined, endDate
       steps_per_day: round(totals.steps / normalizedDays),
       active_energy_kcal_per_day: round((totals.active_energy_kcal ?? 0) / normalizedDays),
       sleep_hours_per_day: round(totals.sleep_minutes / normalizedDays / 60),
-      hrv_sdnn_ms: averageDefined(daily.map((item) => item.heart.hrv_sdnn_ms)),
+      hrv_rmssd_ms: averageDefined(daily.map((item) => item.heart.hrv_rmssd_ms)),
       resting_bpm: averageDefined(daily.map((item) => item.heart.resting_bpm))
     },
     trends: buildWeeklyTrends(daily),
@@ -112,8 +112,8 @@ function summarizeDay(records: SamsungHealthRecord[], workouts: SamsungHealthWor
   exportModifiedAt?: string;
   includeWorkoutRecords?: boolean;
 }) {
-  const steps = sumType(records, "samsung_health_steps");
-  const activeEnergy = sumType(records, "samsung_health_active_energy");
+  const steps = sumDailySteps(records);
+  const activeEnergy = sumDailyActiveEnergy(records);
   const distance = sumType(records, "samsung_health_distance");
   const resting = averageType(records, "samsung_health_resting_heart_rate");
   const hrv = averageType(records, "samsung_health_hrv");
@@ -147,7 +147,7 @@ function summarizeDay(records: SamsungHealthRecord[], workouts: SamsungHealthWor
       min_bpm: minValue(heartRateValues),
       max_bpm: maxValue(heartRateValues),
       resting_bpm: round(resting),
-      hrv_sdnn_ms: round(hrv),
+      hrv_rmssd_ms: round(hrv),
       respiratory_rate: round(respiratoryRate),
       oxygen_saturation: round(oxygenSaturation)
     },
@@ -201,8 +201,8 @@ function buildWeeklyTrends(daily: Array<ReturnType<typeof summarizeDay>>) {
     highest_steps_day: highestStepsDay ? { date: highestStepsDay.date, steps: highestStepsDay.totals.steps } : undefined,
     lowest_sleep_day: lowestSleepDay ? { date: lowestSleepDay.date, hours_asleep: lowestSleepDay.sleep.hours_asleep } : undefined,
     hrv_direction: direction(
-      averageDefined(firstHalf.map((item) => item.heart.hrv_sdnn_ms)),
-      averageDefined(secondHalf.map((item) => item.heart.hrv_sdnn_ms))
+      averageDefined(firstHalf.map((item) => item.heart.hrv_rmssd_ms)),
+      averageDefined(secondHalf.map((item) => item.heart.hrv_rmssd_ms))
     ),
     resting_hr_direction: direction(
       averageDefined(firstHalf.map((item) => item.heart.resting_bpm)),
@@ -212,13 +212,17 @@ function buildWeeklyTrends(daily: Array<ReturnType<typeof summarizeDay>>) {
 }
 
 function sleepBreakdown(records: SamsungHealthRecord[]) {
-  const stageRecords = records.filter((record) => record.type === "samsung_health_sleep" || record.type === "samsung_health_sleep_stage");
+  // Prefer the stage breakdown when available; fall back to whole-session records.
+  // Summing both double-counts since stages partition the session.
+  const stageRecords = records.filter((record) => record.type === "samsung_health_sleep_stage");
+  const sessionRecords = records.filter((record) => record.type === "samsung_health_sleep");
+  const sourceRecords = stageRecords.length > 0 ? stageRecords : sessionRecords;
   const stages: Record<string, number> = {};
   let minutesAsleep = 0;
   let minutesInBed = 0;
   let minutesAwake = 0;
 
-  for (const record of stageRecords) {
+  for (const record of sourceRecords) {
     const minutes = recordDurationMinutes(record);
     const stage = sleepStageName(record.value);
     stages[stage] = round((stages[stage] ?? 0) + minutes) ?? 0;
@@ -248,6 +252,28 @@ function sleepStageName(value: string | undefined): string {
 
 function sumType(records: SamsungHealthRecord[], type: string): number {
   return round(records.filter((record) => record.type === type).reduce((sum, record) => sum + (record.numeric_value ?? 0), 0)) ?? 0;
+}
+
+// Match the Samsung Health app's daily total: prefer per-day aggregates (which sum across all
+// contributing devices) over raw pedometer events (single device, under-counts vs the UI).
+// Fall through to activity_daily so we don't show 0 on days where only that table has coverage.
+function sumDailySteps(records: SamsungHealthRecord[]): number {
+  const trend = sumType(records, "samsung_health_step_daily_trend");
+  if (trend > 0) return trend;
+  const daily = sumType(records, "samsung_health_step_daily");
+  if (daily > 0) return daily;
+  const activity = sumType(records, "samsung_health_activity_daily");
+  if (activity > 0) return activity;
+  return sumType(records, "samsung_health_steps");
+}
+
+// Active energy isn't a standalone Samsung type in current exports — `calories_burned.details`
+// is the per-day rollup. Fall back to the legacy `samsung_health_active_energy` type for older
+// exports that did emit one.
+function sumDailyActiveEnergy(records: SamsungHealthRecord[]): number {
+  const calories = sumType(records, "samsung_health_calories_daily");
+  if (calories > 0) return calories;
+  return sumType(records, "samsung_health_active_energy");
 }
 
 function averageType(records: SamsungHealthRecord[], type: string): number | undefined {

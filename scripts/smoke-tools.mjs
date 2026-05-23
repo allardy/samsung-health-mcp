@@ -18,6 +18,8 @@ const expectedTools = [
   'samsung_health_profile_get',
   'samsung_health_profile_update',
   'samsung_health_quickstart',
+  'samsung_health_range_summary',
+  'samsung_health_series',
   'samsung_health_weekly_summary',
   'samsung_health_wellness_context'
 ];
