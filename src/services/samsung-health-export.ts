@@ -181,19 +181,17 @@ export async function inspectExportLocation(inputPath?: string): Promise<ExportL
 
 export async function listRecords(query: RecordQuery): Promise<SamsungHealthRecord[]> {
   const limit = normalizeLimit(query.limit);
-  const location = await inspectExportLocation(query.exportPath);
-  if (!location.exists) throw new Error(location.note ?? "Samsung Health export not found.");
-  const start = query.start ? parseSamsungDate(query.start) : undefined;
-  const end = query.end ? parseSamsungDate(query.end) : undefined;
   const resolvedType = query.type ? resolveRecordType(query.type) : undefined;
-  const records: SamsungHealthRecord[] = [];
+  // Pull the filtered-by-date set from the shared parsed-export cache instead of re-parsing
+  // the zip on every call. getExportSnapshot already applies the start/end window.
+  const snapshot = await getExportSnapshot({ exportPath: query.exportPath, start: query.start, end: query.end });
+  const cachePath = snapshot.location.resolved_path ?? snapshot.location.input_path;
 
   let incrementalCutoff: Date | undefined;
   let useIncremental = false;
-  const cachePath = location.resolved_path ?? location.input_path;
   if (query.useIncrementalCache && resolvedType && cachePath) {
     useIncremental = true;
-    await invalidateIfExportChanged(cachePath, location.mtime_ms);
+    await invalidateIfExportChanged(cachePath, snapshot.location.mtime_ms);
     const cached = await getLastParsedAt(resolvedType);
     if (cached) {
       const parsed = parseSamsungDate(cached);
@@ -201,28 +199,26 @@ export async function listRecords(query: RecordQuery): Promise<SamsungHealthReco
     }
   }
 
+  const records: SamsungHealthRecord[] = [];
   let newestSeenMs = 0;
-  await parseExportEntities(location, {
-    onRecord(record) {
-      if (resolvedType && record.type !== resolvedType) return false;
-      if (!overlaps(record.startDate, record.endDate, start, end)) return false;
-      if (incrementalCutoff) {
-        const recordStart = parseSamsungDate(record.startDate);
-        if (recordStart && recordStart <= incrementalCutoff) return false;
-      }
-      if (useIncremental) {
-        const ts = parseSamsungDate(record.startDate);
-        if (ts && ts.getTime() > newestSeenMs) newestSeenMs = ts.getTime();
-      }
-      records.push(record);
-      return records.length >= limit;
+  for (const record of snapshot.records) {
+    if (resolvedType && record.type !== resolvedType) continue;
+    if (incrementalCutoff) {
+      const recordStart = parseSamsungDate(record.startDate);
+      if (recordStart && recordStart <= incrementalCutoff) continue;
     }
-  });
+    if (useIncremental) {
+      const ts = parseSamsungDate(record.startDate);
+      if (ts && ts.getTime() > newestSeenMs) newestSeenMs = ts.getTime();
+    }
+    records.push(record);
+    if (records.length >= limit) break;
+  }
 
   if (useIncremental && resolvedType && newestSeenMs > 0 && cachePath) {
     const cache = await loadCache();
     cache.export_path = cachePath;
-    cache.export_mtime_ms = location.mtime_ms;
+    cache.export_mtime_ms = snapshot.location.mtime_ms;
     cache.categories[resolvedType] = new Date(newestSeenMs).toISOString();
     await saveCache(cache);
   }
@@ -232,21 +228,8 @@ export async function listRecords(query: RecordQuery): Promise<SamsungHealthReco
 
 export async function listWorkouts(query: WorkoutQuery): Promise<SamsungHealthWorkout[]> {
   const limit = normalizeLimit(query.limit);
-  const location = await inspectExportLocation(query.exportPath);
-  if (!location.exists) throw new Error(location.note ?? "Samsung Health export not found.");
-  const start = query.start ? parseSamsungDate(query.start) : undefined;
-  const end = query.end ? parseSamsungDate(query.end) : undefined;
-  const workouts: SamsungHealthWorkout[] = [];
-
-  await parseExportEntities(location, {
-    onWorkout(workout) {
-      if (!overlaps(workout.startDate, workout.endDate, start, end)) return false;
-      workouts.push(workout);
-      return workouts.length >= limit;
-    }
-  });
-
-  return workouts;
+  const snapshot = await getExportSnapshot({ exportPath: query.exportPath, start: query.start, end: query.end });
+  return snapshot.workouts.slice(0, limit);
 }
 
 export async function getExportSnapshot(query: SnapshotQuery): Promise<SamsungHealthSnapshot> {
