@@ -9,6 +9,25 @@ import { runCliCommand } from "./cli/commands.js";
 import { registerSamsungHealthPrompts } from "./prompts/samsung-health-prompts.js";
 import { registerSamsungHealthResources } from "./resources/samsung-health-resources.js";
 import { registerSamsungHealthTools } from "./tools/samsung-health-tools.js";
+import { getConfig } from "./services/config.js";
+import { getExportSnapshot } from "./services/samsung-health-export.js";
+
+// Parsing a multi-year nested zip takes ~30 s; the first request that hits a cold cache used to
+// exceed the MCP client's 60 s timeout. Triggering the parse on startup means by the time real
+// tool calls arrive the in-memory cache is warm. Errors are swallowed so missing/invalid export
+// data never blocks server startup — the actual tools surface those errors through their normal
+// error paths.
+function warmExportCache(): void {
+  const { exportPath } = getConfig();
+  if (!exportPath) return;
+  getExportSnapshot({ exportPath })
+    .then((snapshot) => {
+      console.error(`Export cache warmed: ${snapshot.records.length} records, ${snapshot.workouts.length} workouts.`);
+    })
+    .catch((error) => {
+      console.error(`Export cache warmup failed (ignored): ${(error as Error).message}`);
+    });
+}
 
 function createServer(): McpServer {
   const server = new McpServer({
@@ -25,6 +44,7 @@ async function runStdio(): Promise<void> {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  warmExportCache();
 }
 
 async function runHttp(): Promise<void> {
@@ -58,6 +78,7 @@ async function runHttp(): Promise<void> {
   });
   app.listen(port, host, () => {
     console.error(`${SERVER_NAME} HTTP transport listening on http://${host}:${port}/mcp`);
+    warmExportCache();
   });
 }
 

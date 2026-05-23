@@ -91,8 +91,16 @@ interface EntityVisitor {
 
 type CsvRow = Record<string, string>;
 
-const SNAPSHOT_CACHE = new Map<string, SamsungHealthSnapshot>();
-const MAX_SNAPSHOT_CACHE_ENTRIES = 6;
+interface ParsedExport {
+  records: SamsungHealthRecord[];
+  workouts: SamsungHealthWorkout[];
+}
+
+// Keyed by (path, size, mtime). Capped at 2 entries because the parsed data set for a
+// multi-year export sits at ~50 MB resident — holding more risks eating the wrapper container's
+// memory budget when several entries diverge (e.g. across a re-sync from R2).
+const PARSED_EXPORT_CACHE = new Map<string, ParsedExport>();
+const MAX_PARSED_EXPORT_CACHE_ENTRIES = 2;
 
 const DATE_KEYS = {
   start: ["start_time", "starttime", "start_date", "startdate", "start", "from_time", "from", "day_time", "record_time", "measurement_time", "timestamp", "date"],
@@ -246,42 +254,42 @@ export async function getExportSnapshot(query: SnapshotQuery): Promise<SamsungHe
   if (!location.exists) throw new Error(location.note ?? "Samsung Health export not found.");
   const start = query.start ? parseSamsungDate(query.start) : undefined;
   const end = query.end ? parseSamsungDate(query.end) : undefined;
-  const key = snapshotCacheKey(location, query);
-  const cached = SNAPSHOT_CACHE.get(key);
-  if (cached) return { ...cached, cache: { ...cached.cache, hit: true } };
 
-  const records: SamsungHealthRecord[] = [];
-  const workouts: SamsungHealthWorkout[] = [];
-  await parseExportEntities(location, {
-    onRecord(record) {
-      if (!overlaps(record.startDate, record.endDate, start, end)) return false;
-      records.push(record);
-      return false;
-    },
-    onWorkout(workout) {
-      if (!overlaps(workout.startDate, workout.endDate, start, end)) return false;
-      workouts.push(workout);
-      return false;
-    }
-  });
+  // Cache the FULL parsed export keyed only by file state (path + mtime + size). Parsing a
+  // multi-year nested zip (e.g. 74 MB / 89K records / 2K HRV JSON sidecars) takes 30–60 s and
+  // dominates every request. Reusing the parsed result and just filtering in-memory turns
+  // every subsequent call from ~30 s into <100 ms, regardless of how the query window moves.
+  const fileKey = exportFileKey(location);
+  let parsed = PARSED_EXPORT_CACHE.get(fileKey);
+  let cacheHit = true;
+  if (!parsed) {
+    cacheHit = false;
+    const records: SamsungHealthRecord[] = [];
+    const workouts: SamsungHealthWorkout[] = [];
+    await parseExportEntities(location, {
+      onRecord(record) { records.push(record); return false; },
+      onWorkout(workout) { workouts.push(workout); return false; }
+    });
+    parsed = { records, workouts };
+    cacheParsedExport(fileKey, parsed);
+  }
 
-  const snapshot: SamsungHealthSnapshot = {
+  const filteredRecords = (start || end)
+    ? parsed.records.filter((record) => overlaps(record.startDate, record.endDate, start, end))
+    : parsed.records;
+  const filteredWorkouts = (start || end)
+    ? parsed.workouts.filter((workout) => overlaps(workout.startDate, workout.endDate, start, end))
+    : parsed.workouts;
+
+  return {
     source: "samsung_health_export",
     generated_at: new Date().toISOString(),
     location,
-    range: {
-      start: query.start,
-      end: query.end
-    },
-    cache: {
-      key,
-      hit: false
-    },
-    records,
-    workouts
+    range: { start: query.start, end: query.end },
+    cache: { key: fileKey, hit: cacheHit },
+    records: filteredRecords,
+    workouts: filteredWorkouts
   };
-  cacheSnapshot(key, snapshot);
-  return snapshot;
 }
 
 export function parseSamsungDate(value: string | undefined): Date | undefined {
@@ -1082,23 +1090,21 @@ function normalizeKey(value: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-function snapshotCacheKey(location: ExportLocation, query: SnapshotQuery): string {
+function exportFileKey(location: ExportLocation): string {
   return [
     location.resolved_path ?? location.input_path ?? "unknown",
     location.size_bytes ?? 0,
     location.mtime_ms ?? 0,
-    location.csv_count ?? 0,
-    query.start ?? "",
-    query.end ?? ""
+    location.csv_count ?? 0
   ].join("|");
 }
 
-function cacheSnapshot(key: string, snapshot: SamsungHealthSnapshot): void {
-  SNAPSHOT_CACHE.set(key, snapshot);
-  while (SNAPSHOT_CACHE.size > MAX_SNAPSHOT_CACHE_ENTRIES) {
-    const oldest = SNAPSHOT_CACHE.keys().next().value;
+function cacheParsedExport(key: string, parsed: ParsedExport): void {
+  PARSED_EXPORT_CACHE.set(key, parsed);
+  while (PARSED_EXPORT_CACHE.size > MAX_PARSED_EXPORT_CACHE_ENTRIES) {
+    const oldest = PARSED_EXPORT_CACHE.keys().next().value;
     if (!oldest) break;
-    SNAPSHOT_CACHE.delete(oldest);
+    PARSED_EXPORT_CACHE.delete(oldest);
   }
 }
 
